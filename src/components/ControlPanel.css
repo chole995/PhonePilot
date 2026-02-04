@@ -191,6 +191,7 @@
 
 .auto-progress-bar {
   height: 100%;
+  width: var(--progress-percent, 0%);
   background: var(--color-primary);
   transition: width 0.2s ease;
 }
