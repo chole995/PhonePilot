@@ -1,164 +1,102 @@
-<h1 align="center">PhonePilot</h1>
+# PhonePilot
+
+通过机械臂让 AI Agent 操控硬件钱包的桌面应用。基于 [MCP 协议](https://modelcontextprotocol.io/)，AI 可以控制机械臂在硬件钱包屏幕上执行点击、滑动等操作，并通过摄像头实时观察结果。
 
 <p align="center">
-  <strong>Enable AI Agents to Physically Control Your Phone</strong>
+  <img src="docs/assets/arm-hardware.png" alt="硬件设置" width="600">
 </p>
+
+## 为什么用硬件自动化
+
+硬件钱包为了安全性，不提供任何软件接口进行自动化操作。PhonePilot 使用物理机械臂直接触摸屏幕：
+
+- **突破封闭限制** - 无需钱包厂商支持，纯物理操作
+- **安全隔离** - 不接触钱包固件，不影响私钥安全
+- **通用兼容** - Ledger、Trezor、OneKey 等任何触摸屏钱包都能用
+- **批量操作** - 适合需要重复签名、多钱包管理等场景
+
+## 功能
+
+### MCP 工具
+
+| 工具 | 说明 |
+|------|------|
+| `arm-connect` | 连接机械臂控制器 |
+| `arm-disconnect` | 断开机械臂连接 |
+| `arm-move` | 移动机械臂到指定位置 |
+| `arm-click` | 在当前位置执行点击 |
+| `capture-frame` | 捕获当前摄像头画面 |
+
+### 摄像头
+
+- 自动检测并连接 DECXIN 摄像头
+- 手动对焦模式
+- 十字线和网格辅助
+- 90° 自动旋转适配设备屏幕
+
+### 机械臂控制
+
+- 毫米级 X/Y 轴移动精度
+- 可调步进距离 (1-50mm)
+- 可调触摸深度 (Z 轴)
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Electron-28.x-47848F?logo=electron&logoColor=white" alt="Electron"></a>
-  <a href="#"><img src="https://img.shields.io/badge/React-18.x-61DAFB?logo=react&logoColor=white" alt="React"></a>
-  <a href="#"><img src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white" alt="TypeScript"></a>
-  <a href="#"><img src="https://img.shields.io/badge/MCP-1.x-8B5CF6" alt="MCP"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License"></a>
+  <img src="docs/assets/control-software.png" alt="控制界面" width="700">
 </p>
 
----
-
-## About
-
-**PhonePilot** is an innovative desktop application that enables AI agents to physically control smartphones through a mechanical arm. Using the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), AI agents (such as Claude, Cursor, etc.) can directly operate the mechanical arm to perform taps, swipes, and other touch interactions on the phone screen, while observing the results in real-time through a camera feed.
-
-This opens up a new dimension of physical interaction for AI "Computer Use" capabilities — allowing AI to not only control computers but also operate real mobile devices.
-
-<p align="center">
-  <img src="docs/assets/arm-hardware.png" alt="Mechanical Arm Hardware" width="600">
-  <br>
-  <em>Mechanical Arm Hardware Setup</em>
-</p>
-
-## Features
-
-### 🤖 Native MCP Protocol Support
-
-Built-in MCP Server supporting both Streamable HTTP and SSE transport protocols, seamlessly integrating with any MCP-compatible AI client.
-
-| Tool | Description |
-|------|-------------|
-| `arm-connect` | Connect to the mechanical arm controller |
-| `arm-disconnect` | Disconnect from the mechanical arm |
-| `arm-move` | Move the arm to a specified position |
-| `arm-click` | Perform a click at the current position |
-| `capture-frame` | Capture the current camera frame |
-
-### 📷 Real-time Visual Feedback
-
-HD camera with live phone screen preview, featuring:
-- Auto-detection and connection to DECXIN cameras
-- Manual focus mode to prevent autofocus hunting
-- Crosshair and grid overlay assistants
-- 90° auto-rotation to match phone portrait display
-
-<p align="center">
-  <img src="docs/assets/control-software.png" alt="Control Software Interface" width="700">
-  <br>
-  <em>PhonePilot Control Interface</em>
-</p>
-
-### 🎮 Precision Mechanical Control
-
-- Millimeter-accurate X/Y axis movement
-- Adjustable step size (1-50mm)
-- Adjustable touch depth (Z-axis)
-- Real-time operation logging
-
-### 🖥️ Cross-Platform Desktop App
-
-Built with Electron, natively supporting:
-- macOS (Intel & Apple Silicon)
-- Windows (x64)
-- Linux (AppImage, deb)
-
-## Demo
-
-<p align="center">
-  <a href="docs/assets/showcase.mov">
-    <img src="docs/assets/points.png" alt="Point Calibration" width="600">
-    <br>
-    <em>📹 Click to watch the full demo video</em>
-  </a>
-</p>
-
-## How It Works
+## 工作原理
 
 ```
 ┌─────────────────┐     MCP Protocol      ┌──────────────────┐
-│                 │◄────────────────────►│                  │
-│   AI Agent      │   arm-move, click    │   PhonePilot     │
-│  (Claude, etc)  │   capture-frame      │   Desktop App    │
-│                 │                       │                  │
+│   AI Agent      │◄────────────────────►│   PhonePilot     │
+│  (Claude, etc)  │                       │   Desktop App    │
 └─────────────────┘                       └────────┬─────────┘
                                                    │
-                                          ┌────────┴─────────┐
-                                          │                  │
-                                    ┌─────▼─────┐     ┌──────▼─────┐
-                                    │ Mechanical│     │   Camera   │
-                                    │    Arm    │     │  (DECXIN)  │
-                                    └─────┬─────┘     └──────┬─────┘
-                                          │                  │
-                                          ▼                  ▼
-                                    ┌──────────────────────────┐
-                                    │      Smartphone          │
-                                    │    (Physical Device)     │
-                                    └──────────────────────────┘
+                                    ┌──────────────┼──────────────┐
+                                    │              │              │
+                              ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
+                              │ 机械臂    │  │  摄像头   │  │ 硬件钱包  │
+                              └───────────┘  └───────────┘  └───────────┘
 ```
 
-1. **AI Agent** connects to PhonePilot via MCP protocol
-2. **PhonePilot** translates MCP commands into mechanical arm control instructions
-3. **Mechanical Arm** performs physical touch operations on the phone screen
-4. **Camera** captures the screen and returns the frame to the AI agent
-5. **AI Agent** analyzes the frame and decides on the next action
+## 快速开始
 
-## Getting Started
+### 环境要求
 
-### Prerequisites
+- Node.js 20+
+- Yarn
+- 机械臂控制器 (COM 口连接)
+- USB 摄像头
 
-- Node.js 20.x or later
-- Yarn package manager
-- Compatible mechanical arm controller (via COM port)
-- USB camera (DECXIN recommended)
-
-### Installation & Running
+### 安装运行
 
 ```bash
-# Clone the repository
 git clone https://github.com/your-username/PhonePilot.git
 cd PhonePilot
-
-# Install dependencies
 yarn install
-
-# Start development environment
 yarn electron:dev
 ```
 
-### Building for Production
+### 构建
 
 ```bash
-# Build for current platform
-yarn electron:build
-
-# Build for specific platforms
-yarn build:mac     # macOS
-yarn build:win     # Windows
-yarn build:linux   # Linux
+yarn electron:build      # 当前平台
+yarn build:mac           # macOS
+yarn build:win           # Windows
+yarn build:linux         # Linux
 ```
 
-## MCP Integration
+## MCP 配置
 
-PhonePilot provides a complete MCP Server implementation that integrates with any MCP-compatible AI client.
+### 端点
 
-### Endpoints
+| 端点 | 协议 | 用途 |
+|------|------|------|
+| `POST /mcp` | Streamable HTTP | 现代 MCP 客户端 |
+| `GET /sse` | SSE | 传统 MCP 客户端 |
+| `GET /health` | HTTP | 健康检查 |
 
-| Endpoint | Protocol | Purpose |
-|----------|----------|---------|
-| `POST /mcp` | Streamable HTTP | Modern MCP clients |
-| `GET /sse` | SSE | Legacy MCP clients |
-| `GET /health` | HTTP | Health check |
-
-### Configuration Example
-
-Configure the MCP Server in your AI client:
+### 配置示例
 
 ```json
 {
@@ -172,10 +110,4 @@ Configure the MCP Server in your AI client:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<p align="center">
-  <sub>Made with ❤️ for the AI-powered future</sub>
-</p>
+[MIT](LICENSE)
