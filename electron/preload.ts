@@ -26,6 +26,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // HTTP request (bypasses CORS by going through main process)
   httpRequest: (url: string) => ipcRenderer.invoke('http-request', url),
 
+  // Sync arm connection state with MCP
+  syncArmState: (state: {
+    isConnected: boolean;
+    resourceHandle: number;
+    comPort: string;
+  }) => ipcRenderer.invoke('sync-arm-state', state),
+
   // MCP Frame capture: Listen for capture requests from main process
   onCaptureFrameRequest: (callback: () => void) => {
     const handler = () => callback();
@@ -81,6 +88,11 @@ declare global {
       onMainProcessMessage: (callback: (message: string) => void) => void;
       sendMessage: (channel: string, data: unknown) => void;
       httpRequest: (url: string) => Promise<{ status: number; data: string }>;
+      syncArmState: (state: {
+        isConnected: boolean;
+        resourceHandle: number;
+        comPort: string;
+      }) => Promise<void>;
       // MCP Frame capture
       onCaptureFrameRequest: (callback: () => void) => () => void;
       sendCaptureFrameResponse: (frame: string | null) => void;

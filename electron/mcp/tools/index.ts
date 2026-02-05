@@ -17,3 +17,16 @@ export type { ArmClickInput, ArmClickOutput } from './armClick';
 
 export { captureFrameSchema, executeCaptureFrame } from './captureFrame';
 export type { CaptureFrameInput, CaptureFrameOutput } from './captureFrame';
+
+// New automation tools
+export { executeSequenceSchema, executeExecuteSequence } from './executeSequence';
+export type { ExecuteSequenceInput, ExecuteSequenceOutput } from './executeSequence';
+
+export { confirmActionSchema, executeConfirmAction } from './confirmAction';
+export type { ConfirmActionInput, ConfirmActionOutput } from './confirmAction';
+
+export { inputPinSchema, executeInputPin } from './inputPin';
+export type { InputPinInput, InputPinOutput } from './inputPin';
+
+export { stopSequenceSchema, executeStopSequence } from './stopSequence';
+export type { StopSequenceInput, StopSequenceOutput } from './stopSequence';

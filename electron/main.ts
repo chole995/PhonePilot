@@ -246,6 +246,24 @@ ipcMain.handle('http-request', async (_event, url: string) => {
 });
 
 /**
+ * IPC handler: Syncs arm connection state from UI to MCP state.
+ * Called when UI connects/disconnects from arm controller.
+ */
+ipcMain.handle('sync-arm-state', async (_event, state: {
+  isConnected: boolean;
+  resourceHandle: number;
+  comPort: string;
+}) => {
+  const { updateArmState } = await import('./mcp/state.js');
+  updateArmState({
+    isConnected: state.isConnected,
+    resourceHandle: state.resourceHandle,
+    comPort: state.comPort,
+  });
+  console.log(`[sync-arm-state] Updated MCP armState:`, state);
+});
+
+/**
  * IPC listener: Receives captured frame from renderer process.
  * Called in response to 'mcp-capture-frame-request'.
  */

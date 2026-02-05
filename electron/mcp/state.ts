@@ -63,6 +63,9 @@ type McpLogCallback = (log: McpLogEntry) => void;
 /** MCP log function (set by main process) */
 let mcpLogCallback: McpLogCallback | null = null;
 
+/** Global stop flag for interrupting sequences */
+let shouldStopSequence = false;
+
 /**
  * Gets the current arm state.
  */
@@ -169,4 +172,18 @@ export function sendMcpLog(log: McpLogEntry): void {
   }
   // Also log to console
   console.log(`[MCP ${log.type.toUpperCase()}] ${log.action}: ${log.detail}`);
+}
+
+/**
+ * Sets the stop flag to interrupt sequence execution.
+ */
+export function setStopSequenceFlag(value: boolean): void {
+  shouldStopSequence = value;
+}
+
+/**
+ * Checks if sequence should stop.
+ */
+export function shouldStopSequenceExecution(): boolean {
+  return shouldStopSequence;
 }
