@@ -45,9 +45,11 @@ export async function executeArmConnect(
   const state = getArmState();
 
   if (state.isConnected) {
+    // Already connected (either via MCP or UI) - return success
     return {
-      success: false,
-      message: 'Already connected. Disconnect first before reconnecting.',
+      success: true,
+      message: `Already connected to arm controller on ${state.comPort}. Handle: ${state.resourceHandle}`,
+      handle: state.resourceHandle,
     };
   }
 

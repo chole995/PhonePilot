@@ -13,6 +13,12 @@ interface Window {
     onMainProcessMessage: (callback: (message: string) => void) => void;
     sendMessage: (channel: string, data: unknown) => void;
     httpRequest: (url: string) => Promise<{ status: number; data: string }>;
+    // Sync arm connection state with MCP
+    syncArmState: (state: {
+      isConnected: boolean;
+      resourceHandle: number;
+      comPort: string;
+    }) => Promise<void>;
     // MCP Frame capture
     onCaptureFrameRequest: (callback: () => void) => () => void;
     sendCaptureFrameResponse: (frame: string | null) => void;

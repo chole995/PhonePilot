@@ -22,6 +22,15 @@ import {
   executeArmClick,
   captureFrameSchema,
   executeCaptureFrame,
+  // New automation tools
+  executeSequenceSchema,
+  executeExecuteSequence,
+  confirmActionSchema,
+  executeConfirmAction,
+  inputPinSchema,
+  executeInputPin,
+  stopSequenceSchema,
+  executeStopSequence,
 } from './tools';
 import { ARM_STATUS_URI, getArmStatusResource } from './resources';
 import { sendMcpLog } from './state';
@@ -72,10 +81,12 @@ export class PhonePilotMcpServer {
    */
   private registerTools(mcpServer: McpServer): void {
     // arm-connect: Connect to mechanical arm
-    mcpServer.tool(
+    mcpServer.registerTool(
       'arm-connect',
-      'Connect to the mechanical arm controller via COM port. Returns a handle for subsequent operations.',
-      armConnectSchema.shape,
+      {
+        description: 'Connect to the mechanical arm controller via COM port. Returns a handle for subsequent operations.',
+        inputSchema: armConnectSchema,
+      },
       async (args) => {
         sendMcpLog({ type: 'request', action: 'arm-connect', detail: JSON.stringify(args) });
         const result = await executeArmConnect(args, this.httpRequest);
@@ -96,10 +107,12 @@ export class PhonePilotMcpServer {
     );
 
     // arm-disconnect: Disconnect from mechanical arm
-    mcpServer.tool(
+    mcpServer.registerTool(
       'arm-disconnect',
-      'Disconnect from the mechanical arm controller. Resets position to origin before closing.',
-      armDisconnectSchema.shape,
+      {
+        description: 'Disconnect from the mechanical arm controller. Resets position to origin before closing.',
+        inputSchema: armDisconnectSchema,
+      },
       async (args) => {
         sendMcpLog({ type: 'request', action: 'arm-disconnect', detail: 'Disconnecting...' });
         const result = await executeArmDisconnect(args, this.httpRequest);
@@ -120,10 +133,12 @@ export class PhonePilotMcpServer {
     );
 
     // arm-move: Move arm to position
-    mcpServer.tool(
+    mcpServer.registerTool(
       'arm-move',
-      'Move the mechanical arm to a specified X,Y position in millimeters. Optionally returns a camera frame after moving.',
-      armMoveSchema.shape,
+      {
+        description: 'Move the mechanical arm to a specified X,Y position in millimeters. Optionally returns a camera frame after moving.',
+        inputSchema: armMoveSchema,
+      },
       async (args) => {
         sendMcpLog({ type: 'request', action: 'arm-move', detail: `X${args.x} Y${args.y}` });
         const { output, frame } = await executeArmMove(args, this.httpRequest);
@@ -152,10 +167,12 @@ export class PhonePilotMcpServer {
     );
 
     // arm-click: Perform click at current position
-    mcpServer.tool(
+    mcpServer.registerTool(
       'arm-click',
-      'Perform a click operation at the current position. Lowers stylus, waits briefly, then raises it. Optionally returns a camera frame.',
-      armClickSchema.shape,
+      {
+        description: 'Perform a click operation at the current position. Lowers stylus, waits briefly, then raises it. Optionally returns a camera frame.',
+        inputSchema: armClickSchema,
+      },
       async (args) => {
         sendMcpLog({ type: 'request', action: 'arm-click', detail: `depth=${args.depth || 12}` });
         const { output, frame } = await executeArmClick(args, this.httpRequest);
@@ -184,10 +201,12 @@ export class PhonePilotMcpServer {
     );
 
     // capture-frame: Capture camera frame
-    mcpServer.tool(
+    mcpServer.registerTool(
       'capture-frame',
-      'Capture the current camera frame. Returns a JPEG image showing the current view.',
-      captureFrameSchema.shape,
+      {
+        description: 'Capture the current camera frame. Returns a JPEG image showing the current view.',
+        inputSchema: captureFrameSchema,
+      },
       async (args) => {
         sendMcpLog({ type: 'request', action: 'capture-frame', detail: 'Capturing...' });
         const { output, frame } = await executeCaptureFrame(args);
@@ -214,13 +233,146 @@ export class PhonePilotMcpServer {
         return { content };
       }
     );
+
+    // ========================================================================
+    // Automation Tools
+    // ========================================================================
+
+    // execute-sequence: Execute a predefined auto operation sequence
+    mcpServer.registerTool(
+      'execute-sequence',
+      {
+        description: 'Execute a predefined auto operation sequence (e.g., reset-wallet, one-normal-24). Use this to automate device setup and mnemonic recovery.',
+        inputSchema: executeSequenceSchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'execute-sequence', detail: `Sequence: ${args.sequenceId}` });
+        const { output, frame } = await executeExecuteSequence(args, this.httpRequest);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'execute-sequence',
+          detail: output.message,
+        });
+        const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(output, null, 2),
+          },
+        ];
+
+        if (frame) {
+          content.push({
+            type: 'image' as const,
+            data: frame,
+            mimeType: 'image/jpeg',
+          });
+        }
+
+        return { content };
+      }
+    );
+
+    // confirm-action: Click confirm or cancel button
+    mcpServer.registerTool(
+      'confirm-action',
+      {
+        description: 'Click the confirm or cancel button on the device. Use "confirm" to approve an action, "cancel" to reject.',
+        inputSchema: confirmActionSchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'confirm-action', detail: `Action: ${args.action}` });
+        const { output, frame } = await executeConfirmAction(args, this.httpRequest);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'confirm-action',
+          detail: output.message,
+        });
+        const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(output, null, 2),
+          },
+        ];
+
+        if (frame) {
+          content.push({
+            type: 'image' as const,
+            data: frame,
+            mimeType: 'image/jpeg',
+          });
+        }
+
+        return { content };
+      }
+    );
+
+    // input-pin: Input PIN code on device
+    mcpServer.registerTool(
+      'input-pin',
+      {
+        description: 'Input a PIN code on the device using the number pad. Optionally confirms after entering.',
+        inputSchema: inputPinSchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'input-pin', detail: `PIN length: ${args.pin.length}` });
+        const { output, frame } = await executeInputPin(args, this.httpRequest);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'input-pin',
+          detail: output.message,
+        });
+        const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(output, null, 2),
+          },
+        ];
+
+        if (frame) {
+          content.push({
+            type: 'image' as const,
+            data: frame,
+            mimeType: 'image/jpeg',
+          });
+        }
+
+        return { content };
+      }
+    );
+
+    // stop-sequence: Stop the currently running sequence
+    mcpServer.registerTool(
+      'stop-sequence',
+      {
+        description: 'Stops the currently running sequence execution. The sequence will stop at the next step.',
+        inputSchema: stopSequenceSchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'stop-sequence', detail: 'Stopping sequence...' });
+        const output = await executeStopSequence(args);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'stop-sequence',
+          detail: output.message,
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(output, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
   }
 
   /**
    * Registers all MCP resources.
    */
   private registerResources(mcpServer: McpServer): void {
-    mcpServer.resource(
+    mcpServer.registerResource(
       'arm-status',
       ARM_STATUS_URI,
       {
@@ -271,7 +423,7 @@ export class PhonePilotMcpServer {
 
       if (transport) {
         // Reuse existing transport for this session
-        await transport.handleRequest(req, res);
+        await transport.handleRequest(req, res, req.body);
         return;
       }
 
@@ -297,7 +449,7 @@ export class PhonePilotMcpServer {
       await mcpServer.connect(transport);
 
       // Handle the request
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
     });
 
     app.get('/mcp', async (req: Request, res: Response) => {
@@ -309,19 +461,19 @@ export class PhonePilotMcpServer {
       }
 
       const transport = this.streamableTransports.get(sessionId)!;
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
     });
 
     app.delete('/mcp', async (req: Request, res: Response) => {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
-      
+
       if (!sessionId || !this.streamableTransports.has(sessionId)) {
         res.status(400).json({ error: 'Invalid or missing session ID' });
         return;
       }
 
       const transport = this.streamableTransports.get(sessionId)!;
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, req.body);
       this.streamableTransports.delete(sessionId);
     });
 
