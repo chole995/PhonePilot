@@ -110,6 +110,7 @@ export function generateWordSteps(words: string[]): AutoStep[] {
 const MNEMONIC_12_1 = 'air census life sheriff attack include paper provide fantasy left opera sauce'.split(' ');
 const MNEMONIC_12_2 = 'relief exchange burst bullet topple manage impose dumb raise panther sibling shove'.split(' ');
 const MNEMONIC_12_3 = 'pyramid enforce season tide flag brisk law anchor refuse require reward negative'.split(' ');
+const MNEMONIC_12_API = 'journey timber such lumber buzz room march brave cotton chat ensure control'.split(' ');
 
 /** 18-word mnemonics */
 const MNEMONIC_18_1 = 'slab canyon coffee wine gold bronze rigid peace output security boy quick vital cat become stove tape super'.split(' ');
@@ -344,6 +345,12 @@ const ALL_SEQUENCES: AutoSequence[] = [
     name: '12词-3',
     selectTypeStep: { label: '选择12个单词', x: 25, y: 50, depth: 12 },
     wordSteps: generateWordSteps(MNEMONIC_12_3),
+  },
+  {
+    id: 'api-normal-12',
+    name: '签名方法',
+    selectTypeStep: { label: '选择12个单词', x: 25, y: 50, depth: 12 },
+    wordSteps: generateWordSteps(MNEMONIC_12_API),
   },
   // ============================================================================
   // 18-word mnemonics

@@ -30,3 +30,10 @@ export type { InputPinInput, InputPinOutput } from './inputPin';
 
 export { stopSequenceSchema, executeStopSequence } from './stopSequence';
 export type { StopSequenceInput, StopSequenceOutput } from './stopSequence';
+
+// Mnemonic tools
+export { mnemonicStoreSchema, executeMnemonicStore } from './mnemonicStore';
+export type { MnemonicStoreInput, MnemonicStoreOutput } from './mnemonicStore';
+
+export { mnemonicVerifySchema, executeMnemonicVerify } from './mnemonicVerify';
+export type { MnemonicVerifyInput, MnemonicVerifyOutput } from './mnemonicVerify';

@@ -7,7 +7,7 @@
     <meta name="description" content="PhonePilot Desktop Application" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+      content="default-src 'self'; script-src 'self' blob: https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob: https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com https://tessdata.projectnaptha.com blob:; img-src 'self' data: blob:"
     />
     <title>PhonePilot</title>
   </head>

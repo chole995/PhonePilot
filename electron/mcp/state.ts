@@ -66,6 +66,16 @@ let mcpLogCallback: McpLogCallback | null = null;
 /** Global stop flag for interrupting sequences */
 let shouldStopSequence = false;
 
+/** Stored mnemonic words from OCR recognition */
+let storedMnemonicWords: string[] = [];
+
+/** Mnemonic storage metadata */
+let mnemonicMetadata: {
+  capturedAt?: string;
+  wordCount?: number;
+  source?: string;
+} = {};
+
 /**
  * Gets the current arm state.
  */
@@ -186,4 +196,60 @@ export function setStopSequenceFlag(value: boolean): void {
  */
 export function shouldStopSequenceExecution(): boolean {
   return shouldStopSequence;
+}
+
+/**
+ * Stores mnemonic words for later verification.
+ * @param words - Array of mnemonic words in order
+ * @param source - Source of the mnemonic (e.g., 'ocr', 'manual')
+ */
+export function storeMnemonicWords(words: string[], source: string = 'ocr'): void {
+  storedMnemonicWords = [...words];
+  mnemonicMetadata = {
+    capturedAt: new Date().toISOString(),
+    wordCount: words.length,
+    source,
+  };
+  console.log(`[MCP] Stored ${words.length} mnemonic words from ${source}`);
+}
+
+/**
+ * Gets the stored mnemonic words.
+ */
+export function getStoredMnemonicWords(): string[] {
+  return [...storedMnemonicWords];
+}
+
+/**
+ * Gets a specific mnemonic word by index (1-based).
+ * @param index - 1-based index of the word
+ */
+export function getMnemonicWordByIndex(index: number): string | null {
+  if (index < 1 || index > storedMnemonicWords.length) {
+    return null;
+  }
+  return storedMnemonicWords[index - 1];
+}
+
+/**
+ * Gets mnemonic storage metadata.
+ */
+export function getMnemonicMetadata(): typeof mnemonicMetadata {
+  return { ...mnemonicMetadata };
+}
+
+/**
+ * Clears stored mnemonic words.
+ */
+export function clearMnemonicWords(): void {
+  storedMnemonicWords = [];
+  mnemonicMetadata = {};
+  console.log('[MCP] Cleared stored mnemonic words');
+}
+
+/**
+ * Checks if mnemonic words are stored.
+ */
+export function hasMnemonicWords(): boolean {
+  return storedMnemonicWords.length > 0;
 }

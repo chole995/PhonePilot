@@ -15,13 +15,12 @@ import {
   getAllSequenceIds,
   getSequence,
   getFullSteps,
-  type AutoStep,
   type AutoSequence,
 } from '../../electron/mcp/sequences';
 
 // Get all sequences from the shared definition
 const OPERATION_SEQUENCES: AutoSequence[] = getAllSequenceIds()
-  .map(id => getSequence(id))
+  .map((id: string) => getSequence(id))
   .filter((seq): seq is AutoSequence => seq !== undefined);
 
 interface ControlPanelState {

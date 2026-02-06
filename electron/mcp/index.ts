@@ -31,6 +31,11 @@ import {
   executeInputPin,
   stopSequenceSchema,
   executeStopSequence,
+  // Mnemonic tools
+  mnemonicStoreSchema,
+  executeMnemonicStore,
+  mnemonicVerifySchema,
+  executeMnemonicVerify,
 } from './tools';
 import { ARM_STATUS_URI, getArmStatusResource } from './resources';
 import { sendMcpLog } from './state';
@@ -353,6 +358,62 @@ export class PhonePilotMcpServer {
         sendMcpLog({
           type: output.success ? 'response' : 'error',
           action: 'stop-sequence',
+          detail: output.message,
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(output, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // ========================================================================
+    // Mnemonic Tools
+    // ========================================================================
+
+    // mnemonic-store: Store/retrieve mnemonic words
+    mcpServer.registerTool(
+      'mnemonic-store',
+      {
+        description: 'Store, retrieve, or clear mnemonic words. Use after OCR recognition to save seed phrase for later verification.',
+        inputSchema: mnemonicStoreSchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'mnemonic-store', detail: `action=${args.action}` });
+        const output = await executeMnemonicStore(args);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'mnemonic-store',
+          detail: output.message,
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(output, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // mnemonic-verify: Find correct word option for verification
+    mcpServer.registerTool(
+      'mnemonic-verify',
+      {
+        description: 'Find the correct word to click during mnemonic verification. Given a word index (e.g., "Word #5") and OCR results from the verification screen, returns the position of the correct option to click.',
+        inputSchema: mnemonicVerifySchema,
+      },
+      async (args) => {
+        sendMcpLog({ type: 'request', action: 'mnemonic-verify', detail: `wordIndex=${args.wordIndex}` });
+        const output = await executeMnemonicVerify(args);
+        sendMcpLog({
+          type: output.success ? 'response' : 'error',
+          action: 'mnemonic-verify',
           detail: output.message,
         });
         return {

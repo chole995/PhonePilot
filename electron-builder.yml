@@ -9,6 +9,14 @@ files:
   - dist/**/*
   - dist-electron/**/*
 
+# Include Python OCR scripts
+extraResources:
+  - from: python
+    to: python
+    filter:
+      - "**/*.py"
+      - "**/*.txt"
+
 extraMetadata:
   main: dist-electron/main.js
 
