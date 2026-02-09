@@ -15,6 +15,8 @@ import {
   getAllSequenceIds,
   getSequence,
   getFullSteps,
+  getAllCategories,
+  getSequencesByCategory,
   type AutoSequence,
 } from '../../electron/mcp/sequences';
 
@@ -22,6 +24,9 @@ import {
 const OPERATION_SEQUENCES: AutoSequence[] = getAllSequenceIds()
   .map((id: string) => getSequence(id))
   .filter((seq): seq is AutoSequence => seq !== undefined);
+
+// Get all categories for the sequence panel
+const SEQUENCE_CATEGORIES = getAllCategories();
 
 interface ControlPanelState {
   isConnected: boolean;
@@ -38,6 +43,9 @@ interface ControlPanelState {
   isAutoRunning: boolean;
   autoProgress: number;
   selectedSequenceId: string;
+  selectedCategory: string;
+  /** Words captured via OCR during create-wallet flow */
+  capturedWords: string[];
 }
 
 interface LogEntry {
@@ -63,6 +71,8 @@ function ControlPanel() {
     isAutoRunning: false,
     autoProgress: 0,
     selectedSequenceId: OPERATION_SEQUENCES[0].id,
+    selectedCategory: SEQUENCE_CATEGORIES[0],
+    capturedWords: [],
   });
 
   // Ref to track if auto operation should be cancelled
@@ -326,20 +336,26 @@ function ControlPanel() {
   };
 
   /**
-   * Executes the selected auto operation sequence.
-   * Performs move and click operations for each step with configurable delay between steps.
+   * Executes an auto operation sequence.
+   * If sequenceId is provided, runs that sequence; otherwise uses the currently selected one.
    */
-  const handleAutoOperation = async () => {
+  const handleAutoOperation = async (sequenceId?: string) => {
     if (state.isLoading || !state.isConnected || !state.isReady || state.isAutoRunning) return;
 
-    const sequence = OPERATION_SEQUENCES.find(s => s.id === state.selectedSequenceId);
+    const targetId = sequenceId || state.selectedSequenceId;
+    const sequence = OPERATION_SEQUENCES.find(s => s.id === targetId);
     if (!sequence) return;
+
+    // Update selected sequence ID to match what we're running
+    if (sequenceId) {
+      setState(prev => ({ ...prev, selectedSequenceId: targetId }));
+    }
 
     // getFullSteps is now imported from sequences.ts
     const steps = getFullSteps(sequence);
 
     autoOperationCancelledRef.current = false;
-    setState(prev => ({ ...prev, isAutoRunning: true, autoProgress: 0, error: null }));
+    setState(prev => ({ ...prev, isAutoRunning: true, autoProgress: 0, error: null, capturedWords: [] }));
     addLog('自动', `开始执行自动操作序列: ${sequence.name}`);
 
     try {
@@ -353,7 +369,41 @@ function ControlPanel() {
         const step = steps[i];
         setState(prev => ({ ...prev, autoProgress: i + 1 }));
 
-        if (step.swipeTo) {
+        if (step.ocrCapture) {
+          // OCR capture step: move arm out of the way (no click), then trigger OCR
+          await sendCommand({
+            duankou: '0',
+            hco: state.resourceHandle,
+            daima: `X${step.x}Y${step.y}`,
+          });
+
+          addLog('自动', `${step.label} - 移动到 (${step.x},${step.y})，等待OCR识别...`);
+
+          // Wait for arm to settle
+          await delay(1000);
+
+          // Trigger OCR and wait for result (with 30s timeout)
+          const ocrResult = await Promise.race([
+            new Promise<{ words: string[] }>((resolve) => {
+              const handler = (e: Event) => {
+                window.removeEventListener('phonepilot:ocr-result', handler);
+                resolve((e as CustomEvent).detail);
+              };
+              window.addEventListener('phonepilot:ocr-result', handler);
+              window.dispatchEvent(new CustomEvent('phonepilot:trigger-ocr'));
+            }),
+            new Promise<{ words: string[] }>((resolve) =>
+              setTimeout(() => resolve({ words: [] }), 30000)
+            ),
+          ]);
+
+          if (ocrResult.words.length > 0) {
+            setState(prev => ({ ...prev, capturedWords: ocrResult.words }));
+            addLog('OCR', `识别到 ${ocrResult.words.length} 个单词: ${ocrResult.words.join(', ')}`);
+          } else {
+            addLog('OCR', '未能识别到助记词');
+          }
+        } else if (step.swipeTo) {
           // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
           await sendCommand({
             duankou: '0',
@@ -437,8 +487,12 @@ function ControlPanel() {
 
   const isControlDisabled = !state.isConnected || !state.isReady || state.isLoading || state.isAutoRunning;
 
+  const categorySequences = getSequencesByCategory(state.selectedCategory);
+  const runningSequence = OPERATION_SEQUENCES.find(s => s.id === state.selectedSequenceId);
+
   return (
     <div className="control-panel">
+      {/* Connection Settings - full width top */}
       <div className="control-section connection-section">
         <h3>连接设置</h3>
         <div className="connection-row">
@@ -474,33 +528,113 @@ function ControlPanel() {
         </div>
       </div>
 
-      <div className="control-section auto-operation-section">
-        <h3>自动操作</h3>
-        <div className="auto-operation-row">
-          <select
-            value={state.selectedSequenceId}
-            onChange={(e) => setState(prev => ({ ...prev, selectedSequenceId: e.target.value }))}
-            disabled={state.isAutoRunning || !state.isConnected || !state.isReady || state.isLoading}
-            className="sequence-select"
-            aria-label="选择操作序列"
-          >
-            {OPERATION_SEQUENCES.map(seq => (
-              <option key={seq.id} value={seq.id}>{seq.name}</option>
+      {state.error && (
+        <div className="error-message">
+          {state.error}
+        </div>
+      )}
+
+      {/* Main body: left manual + right sequences */}
+      <div className="control-body">
+        {/* Left: Manual Operation */}
+        <div className="manual-section">
+          <h3>手动操作</h3>
+          <div className="control-selectors">
+            <label>
+              <span>步长</span>
+              <select
+                value={state.stepSize}
+                onChange={(e) => setState(prev => ({ ...prev, stepSize: parseInt(e.target.value, 10) }))}
+                disabled={isControlDisabled}
+              >
+                {ARM_CONTROLLER_CONFIG.stepOptions.map(step => (
+                  <option key={step} value={step}>{step}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>深度</span>
+              <select
+                value={state.zDepth}
+                onChange={(e) => setState(prev => ({ ...prev, zDepth: parseInt(e.target.value, 10) }))}
+                disabled={isControlDisabled}
+              >
+                {ARM_CONTROLLER_CONFIG.zDepthOptions.map(depth => (
+                  <option key={depth} value={depth}>Z{depth}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="direction-controls">
+            <div className="direction-grid">
+              <div className="grid-cell"></div>
+              <div className="grid-cell">
+                <button className="direction-btn" onClick={() => handleMove('up')} disabled={isControlDisabled} title="向上">↑</button>
+              </div>
+              <div className="grid-cell"></div>
+              <div className="grid-cell">
+                <button className="direction-btn" onClick={() => handleMove('left')} disabled={isControlDisabled} title="向左">←</button>
+              </div>
+              <div className="grid-cell">
+                <button className="click-btn" onClick={handleClick} disabled={isControlDisabled} title="点击">点击</button>
+              </div>
+              <div className="grid-cell">
+                <button className="direction-btn" onClick={() => handleMove('right')} disabled={isControlDisabled} title="向右">→</button>
+              </div>
+              <div className="grid-cell"></div>
+              <div className="grid-cell">
+                <button className="direction-btn" onClick={() => handleMove('down')} disabled={isControlDisabled} title="向下">↓</button>
+              </div>
+              <div className="grid-cell"></div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Preset Sequences */}
+        <div className="sequence-section">
+          <h3>预置指令</h3>
+          <div className="sequence-category-tabs">
+            {SEQUENCE_CATEGORIES.map(cat => (
+              <button
+                key={cat}
+                className={`seq-cat-tab ${state.selectedCategory === cat ? 'active' : ''}`}
+                onClick={() => setState(prev => ({ ...prev, selectedCategory: cat }))}
+              >
+                {cat}
+              </button>
             ))}
-          </select>
-          <button
-            className={`btn btn-auto ${state.isAutoRunning ? 'btn-secondary' : 'btn-primary'}`}
-            onClick={state.isAutoRunning ? handleCancelAutoOperation : handleAutoOperation}
-            disabled={!state.isConnected || !state.isReady || state.isLoading}
-          >
-            {state.isAutoRunning
-              ? `取消 (${state.autoProgress}/${getFullSteps(OPERATION_SEQUENCES.find(s => s.id === state.selectedSequenceId)!).length})`
-              : '开始'}
-          </button>
-          {state.isAutoRunning && (
+          </div>
+          <div className="sequence-list">
+            {categorySequences.map(seq => {
+              const isRunning = state.isAutoRunning && state.selectedSequenceId === seq.id;
+              return (
+                <button
+                  key={seq.id}
+                  className={`sequence-btn ${isRunning ? 'running' : ''}`}
+                  onClick={() => {
+                    if (isRunning) {
+                      handleCancelAutoOperation();
+                    } else {
+                      handleAutoOperation(seq.id);
+                    }
+                  }}
+                  disabled={(!isRunning && isControlDisabled) || (state.isAutoRunning && !isRunning)}
+                >
+                  <span className="seq-btn-name">{seq.name}</span>
+                  {isRunning && runningSequence && (
+                    <span className="seq-btn-progress">
+                      {state.autoProgress}/{getFullSteps(runningSequence).length}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {state.isAutoRunning && runningSequence && (
             <div
               className="auto-progress"
-              style={{ '--progress-percent': `${(state.autoProgress / getFullSteps(OPERATION_SEQUENCES.find(s => s.id === state.selectedSequenceId)!).length) * 100}%` } as React.CSSProperties}
+              style={{ '--progress-percent': `${(state.autoProgress / getFullSteps(runningSequence).length) * 100}%` } as React.CSSProperties}
             >
               <div className="auto-progress-bar" />
             </div>
@@ -508,119 +642,40 @@ function ControlPanel() {
         </div>
       </div>
 
-      {state.error && (
-        <div className="error-message">
-          {state.error}
+      {/* Captured Words Display */}
+      {state.capturedWords.length > 0 && (
+        <div className="captured-words-section">
+          <div className="captured-words-header">
+            <h3>识别到的助记词</h3>
+            <span className="captured-words-count">{state.capturedWords.length} 个</span>
+          </div>
+          <div className="captured-words-grid">
+            {state.capturedWords.map((word, i) => (
+              <span key={i} className="captured-word">
+                <span className="word-index">{i + 1}.</span>
+                <span className="word-text">{word}</span>
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
-      <div className="control-content">
-        <div className="control-left">
-          <div className="direction-section">
-            <div className="control-selectors">
-              <label>
-                <span>步长</span>
-                <select
-                  value={state.stepSize}
-                  onChange={(e) => setState(prev => ({ ...prev, stepSize: parseInt(e.target.value, 10) }))}
-                  disabled={isControlDisabled}
-                >
-                  {ARM_CONTROLLER_CONFIG.stepOptions.map(step => (
-                    <option key={step} value={step}>{step}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>深度</span>
-                <select
-                  value={state.zDepth}
-                  onChange={(e) => setState(prev => ({ ...prev, zDepth: parseInt(e.target.value, 10) }))}
-                  disabled={isControlDisabled}
-                >
-                  {ARM_CONTROLLER_CONFIG.zDepthOptions.map(depth => (
-                    <option key={depth} value={depth}>Z{depth}</option>
-                  ))}
-                </select>
-              </label>
+      {/* Bottom: Operation Logs */}
+      <div className="logs-section">
+        <div className="action-logs">
+          {logs.length === 0 ? (
+            <div className="logs-empty">暂无操作日志</div>
+          ) : (
+            <div className="logs-list">
+              {logs.map(log => (
+                <div key={log.id} className="log-entry">
+                  <span className="log-time">{log.time}</span>
+                  <span className="log-action">{log.action}</span>
+                  <span className="log-detail">{log.detail}</span>
+                </div>
+              ))}
             </div>
-
-            <div className="direction-controls">
-              <div className="direction-grid">
-                <div className="grid-cell"></div>
-                <div className="grid-cell">
-                  <button
-                    className="direction-btn"
-                    onClick={() => handleMove('up')}
-                    disabled={isControlDisabled}
-                    title="向上"
-                  >
-                    ↑
-                  </button>
-                </div>
-                <div className="grid-cell"></div>
-                <div className="grid-cell">
-                  <button
-                    className="direction-btn"
-                    onClick={() => handleMove('left')}
-                    disabled={isControlDisabled}
-                    title="向左"
-                  >
-                    ←
-                  </button>
-                </div>
-                <div className="grid-cell">
-                  <button
-                    className="click-btn"
-                    onClick={handleClick}
-                    disabled={isControlDisabled}
-                    title="点击"
-                  >
-                    点击
-                  </button>
-                </div>
-                <div className="grid-cell">
-                  <button
-                    className="direction-btn"
-                    onClick={() => handleMove('right')}
-                    disabled={isControlDisabled}
-                    title="向右"
-                  >
-                    →
-                  </button>
-                </div>
-                <div className="grid-cell"></div>
-                <div className="grid-cell">
-                  <button
-                    className="direction-btn"
-                    onClick={() => handleMove('down')}
-                    disabled={isControlDisabled}
-                    title="向下"
-                  >
-                    ↓
-                  </button>
-                </div>
-                <div className="grid-cell"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="control-right">
-          <div className="action-logs">
-            {logs.length === 0 ? (
-              <div className="logs-empty">暂无操作日志</div>
-            ) : (
-              <div className="logs-list">
-                {logs.map(log => (
-                  <div key={log.id} className="log-entry">
-                    <span className="log-time">{log.time}</span>
-                    <span className="log-action">{log.action}</span>
-                    <span className="log-detail">{log.detail}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
     </div>

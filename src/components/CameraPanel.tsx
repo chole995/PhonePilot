@@ -707,6 +707,73 @@ function CameraPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captureFrame]);
 
+  // Listen for external OCR trigger events (from ControlPanel sequence executor)
+  useEffect(() => {
+    const handleTriggerOcr = async () => {
+      console.log('[CameraPanel] External OCR trigger received');
+      setIsOcrProcessing(true);
+
+      let bestWords: { index: number; word: string }[] = [];
+      let bestConfidence = 0;
+
+      try {
+        for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
+          console.log(`[CameraPanel] OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
+          const result = await runSingleOcr();
+          if (!result) continue;
+
+          if (result.mnemonicWords.length > bestWords.length) {
+            bestWords = result.mnemonicWords;
+            bestConfidence = result.confidence;
+          }
+
+          if (result.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT) {
+            console.log(`[CameraPanel] Found ${result.mnemonicWords.length} words, done.`);
+            break;
+          }
+
+          if (attempt < MAX_OCR_RETRIES) {
+            await new Promise((resolve) => setTimeout(resolve, OCR_RETRY_DELAY));
+          }
+        }
+
+        const words = bestWords.map((w) => w.word);
+
+        // Update local CameraPanel display
+        if (bestWords.length > 0) {
+          setOcrResult({
+            text: `✓ 自动识别到 ${bestWords.length} 个助记词:\n${bestWords.map((w) => `${w.index}. ${w.word}`).join('\n')}`,
+            confidence: bestConfidence,
+            timestamp: new Date(),
+          });
+
+          if (words.length >= EXPECTED_MNEMONIC_COUNT) {
+            setStoredMnemonic({ words, timestamp: new Date() });
+          }
+        }
+
+        // Dispatch result back to sequence executor
+        window.dispatchEvent(
+          new CustomEvent('phonepilot:ocr-result', {
+            detail: { words, confidence: bestConfidence },
+          })
+        );
+      } catch (err) {
+        console.error('[CameraPanel] Triggered OCR failed:', err);
+        window.dispatchEvent(
+          new CustomEvent('phonepilot:ocr-result', {
+            detail: { words: [], confidence: 0 },
+          })
+        );
+      } finally {
+        setIsOcrProcessing(false);
+      }
+    };
+
+    window.addEventListener('phonepilot:trigger-ocr', handleTriggerOcr);
+    return () => window.removeEventListener('phonepilot:trigger-ocr', handleTriggerOcr);
+  }, [runSingleOcr]);
+
   // Handle device selection change
   const handleDeviceChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const deviceId = event.target.value;

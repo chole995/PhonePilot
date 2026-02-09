@@ -74,7 +74,6 @@ function McpLogsPanel() {
   return (
     <div className="mcp-logs-panel">
       <div className="mcp-logs-header">
-        <h3>MCP Logs</h3>
         {logs.length > 0 && (
           <button
             className="clear-logs-btn"

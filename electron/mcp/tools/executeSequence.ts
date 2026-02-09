@@ -43,14 +43,35 @@ export interface ExecuteSequenceOutput {
 }
 
 /**
- * Executes a single step (click or swipe).
+ * Executes a single step (click, swipe, or OCR capture).
  */
 async function executeStep(
   step: AutoStep,
   resourceHandle: number,
   httpRequest: (url: string) => Promise<string>
 ): Promise<void> {
-  if (step.swipeTo) {
+  if (step.ocrCapture) {
+    // OCR capture step: move arm out of the way without clicking
+    const moveUrl = buildArmApiUrl({
+      duankou: '0',
+      hco: resourceHandle,
+      daima: `X${step.x}Y${step.y}`,
+    });
+    await httpRequest(moveUrl);
+
+    // Update position
+    updateArmState({
+      currentX: step.x,
+      currentY: step.y,
+    });
+
+    // Wait for arm to settle, then capture frame for OCR
+    await delay(1000);
+    const frame = await captureFrame();
+    if (frame) {
+      console.log('[execute-sequence] OCR capture frame taken at', step.x, step.y);
+    }
+  } else if (step.swipeTo) {
     // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
     const moveToStartUrl = buildArmApiUrl({
       duankou: '0',
