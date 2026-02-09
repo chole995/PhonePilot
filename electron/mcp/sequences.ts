@@ -22,6 +22,10 @@ export interface AutoStep {
   swipeHoldDelay?: number;
   /** If true, moves arm to position without clicking, then triggers OCR capture */
   ocrCapture?: boolean;
+  /** If set, performs verification OCR and clicks the correct option */
+  ocrVerify?: {
+    options: { x: number; y: number; depth: number }[];
+  };
 }
 
 /**
@@ -405,6 +409,25 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: '点击继续', x: 50, y: 85, depth: 12 },
     ],
   },
+  {
+    id: 'create-verify-word',
+    name: '验证单词',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '验证单词',
+        x: 85, y: 0, depth: 12,
+        ocrVerify: {
+          options: [
+            { x: 35, y: 65, depth: 12 },
+            { x: 35, y: 75, depth: 12 },
+            { x: 35, y: 85, depth: 12 },
+          ],
+        },
+        delayAfter: 2000,
+      },
+    ],
+  },
 
 
   // --------------------------------------------------------------------------
@@ -608,7 +631,7 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'create-wallet',
     name: '创建新钱包',
     category: '创建钱包',
-    actions: [...CREATE_PREFIX, 'create-backup-confirm', 'create-screenshot', 'create-continue'],
+    actions: [...CREATE_PREFIX, 'create-backup-confirm', 'create-screenshot', 'create-continue', 'create-verify-word', 'create-verify-word', 'create-verify-word'],
   },
 
   // ============================================================================

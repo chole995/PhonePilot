@@ -369,7 +369,64 @@ function ControlPanel() {
         const step = steps[i];
         setState(prev => ({ ...prev, autoProgress: i + 1 }));
 
-        if (step.ocrCapture) {
+        if (step.ocrVerify) {
+          // Verification OCR step: move arm, OCR to detect word index, click correct option
+          await sendCommand({
+            duankou: '0',
+            hco: state.resourceHandle,
+            daima: `X${step.x}Y${step.y}`,
+          });
+
+          addLog('自动', `${step.label} - 移动到 (${step.x},${step.y})，等待验证OCR...`);
+
+          // Wait for arm to settle
+          await delay(1000);
+
+          // Trigger verification OCR and wait for result (with 30s timeout)
+          const verifyResult = await Promise.race([
+            new Promise<{ optionIndex: number; wordIndex: number; correctWord: string }>((resolve) => {
+              const handler = (e: Event) => {
+                window.removeEventListener('phonepilot:verify-ocr-result', handler);
+                resolve((e as CustomEvent).detail);
+              };
+              window.addEventListener('phonepilot:verify-ocr-result', handler);
+              window.dispatchEvent(new CustomEvent('phonepilot:trigger-verify-ocr'));
+            }),
+            new Promise<{ optionIndex: number; wordIndex: number; correctWord: string }>((resolve) =>
+              setTimeout(() => resolve({ optionIndex: -1, wordIndex: -1, correctWord: '' }), 30000)
+            ),
+          ]);
+
+          if (verifyResult.optionIndex >= 0 && verifyResult.optionIndex < step.ocrVerify.options.length) {
+            const option = step.ocrVerify.options[verifyResult.optionIndex];
+            addLog('验证', `单词 #${verifyResult.wordIndex} -> ${verifyResult.correctWord.toUpperCase()} (选项${verifyResult.optionIndex + 1})`);
+
+            // Click the correct option: move to position -> lower stylus -> raise stylus
+            await sendCommand({
+              duankou: '0',
+              hco: state.resourceHandle,
+              daima: `X${option.x}Y${option.y}`,
+            });
+
+            await sendCommand({
+              duankou: '0',
+              hco: state.resourceHandle,
+              daima: `Z${option.depth}`,
+            });
+
+            await delay(ARM_CONTROLLER_CONFIG.clickDelay);
+
+            await sendCommand({
+              duankou: '0',
+              hco: state.resourceHandle,
+              daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
+            });
+
+            addLog('验证', `已点击选项${verifyResult.optionIndex + 1} (${option.x},${option.y})`);
+          } else {
+            addLog('验证', `验证失败: 未找到匹配选项 (单词 #${verifyResult.wordIndex})`);
+          }
+        } else if (step.ocrCapture) {
           // OCR capture step: move arm out of the way (no click), then trigger OCR
           await sendCommand({
             duankou: '0',
