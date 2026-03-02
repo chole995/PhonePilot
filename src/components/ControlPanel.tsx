@@ -517,8 +517,8 @@ function ControlPanel() {
           addLog('自动', `${step.label} (${step.x},${step.y})`);
         }
 
-        // Wait before next step (use custom delay or default 100ms)
-        await delay(step.delayAfter ?? 200);
+        // Wait before next step (use custom delay or default 100ms for faster execution)
+        await delay(step.delayAfter ?? 100);
       }
 
       if (!autoOperationCancelledRef.current) {

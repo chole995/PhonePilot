@@ -143,8 +143,8 @@ async function executeStep(
     });
   }
 
-  // Wait after step
-  await delay(step.delayAfter ?? 200);
+  // Wait after step (default 175ms for faster sequence execution)
+  await delay(step.delayAfter ?? 175);
 }
 
 /**

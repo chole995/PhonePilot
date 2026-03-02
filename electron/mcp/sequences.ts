@@ -93,6 +93,11 @@ export const DEVICE_BUTTONS = {
 // Helper functions
 // ============================================================================
 
+/** Delay (ms) after each letter tap when typing mnemonic words. Reduce to speed up. */
+export const STEP_DELAY_AFTER_LETTER_MS = 350;
+/** Delay (ms) after each word confirm tap. Reduce to speed up. */
+export const STEP_DELAY_AFTER_CONFIRM_MS = 600;
+
 /**
  * Generates AutoStep array from a list of words.
  * Each word becomes: letter steps + confirm step.
@@ -110,7 +115,7 @@ export function generateWordSteps(words: string[]): AutoStep[] {
           x: coord.x,
           y: coord.y,
           depth: 12,
-          delayAfter: 1000,
+          delayAfter: STEP_DELAY_AFTER_LETTER_MS,
         });
       }
     }
@@ -120,7 +125,7 @@ export function generateWordSteps(words: string[]): AutoStep[] {
       x: CONFIRM_COORD.x,
       y: CONFIRM_COORD.y,
       depth: 12,
-      delayAfter: 2000,
+      delayAfter: STEP_DELAY_AFTER_CONFIRM_MS,
     });
   });
   return steps;

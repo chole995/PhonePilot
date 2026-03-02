@@ -28,7 +28,8 @@ export const ARM_CONFIG = {
   apiPath: '/MyWcfService/getstring',
   deviceReadyDelay: 2000,
   commandDelay: 300,
-  clickDelay: 250,
+  /** Stylus down time per click (ms). Lower = faster steps, may need increase if taps are missed. */
+  clickDelay: 150,
   defaultZDepth: 12,
   zUp: 0,
 } as const;

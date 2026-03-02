@@ -15,6 +15,14 @@ interface OcrResult {
   timestamp: Date;
 }
 
+/** A single recognized mnemonic word with metadata */
+interface MnemonicWord {
+  index: number;
+  word: string;
+  original?: string;
+  wordConfidence: number;
+}
+
 /** Stored mnemonic words from previous recognition */
 interface StoredMnemonic {
   words: string[];
@@ -62,6 +70,105 @@ function correctToBip39(ocrWord: string): { word: string; corrected: boolean } {
     if (dist === 0) break; // exact match shortcut
   }
   return { word: bestWord, corrected: bestDist > 0 && bestDist <= 3 };
+}
+
+/**
+ * Returns the top-N BIP39 candidate words for an OCR word, sorted by Levenshtein distance.
+ * Used for BIP39-guided auto-correction when checksum validation fails.
+ */
+function getBip39Candidates(ocrWord: string, topN: number = 5): { word: string; distance: number }[] {
+  const candidates: { word: string; distance: number }[] = [];
+  for (const w of bip39English) {
+    const dist = levenshteinDistance(ocrWord, w);
+    if (dist <= 3) {
+      candidates.push({ word: w, distance: dist });
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates.slice(0, topN);
+}
+
+/**
+ * Attempts BIP39 checksum-guided auto-correction on mnemonic words.
+ * Sorts words by confidence (lowest first), then tries top BIP39 candidates
+ * for each suspicious word until a valid mnemonic is found.
+ * Mutates the mnemonicWords array in-place if correction succeeds.
+ * Returns true if a valid mnemonic was found.
+ */
+function tryBip39AutoCorrect(mnemonicWords: MnemonicWord[]): boolean {
+  if (mnemonicWords.length < 12) return false;
+
+  const words = mnemonicWords.map(w => w.word);
+  const phrase = words.join(' ');
+
+  // Already valid
+  try {
+    if (validateMnemonic(phrase, bip39English)) return true;
+  } catch { /* ignore */ }
+
+  // Sort indices by confidence (lowest first) to prioritize suspicious words
+  const sortedIndices = mnemonicWords
+    .map((w, i) => ({ i, conf: w.wordConfidence }))
+    .sort((a, b) => a.conf - b.conf)
+    .map(e => e.i);
+
+  // Try single-word substitution first (most common case: only 1 word is wrong)
+  for (const idx of sortedIndices) {
+    const originalWord = mnemonicWords[idx].original || mnemonicWords[idx].word;
+    const candidates = getBip39Candidates(originalWord);
+
+    for (const candidate of candidates) {
+      if (candidate.word === mnemonicWords[idx].word) continue; // skip current
+
+      const testWords = [...words];
+      testWords[idx] = candidate.word;
+      const testPhrase = testWords.join(' ');
+
+      try {
+        if (validateMnemonic(testPhrase, bip39English)) {
+          console.log(`[BIP39 AutoCorrect] Fixed word #${mnemonicWords[idx].index}: "${mnemonicWords[idx].word}" -> "${candidate.word}" (conf: ${mnemonicWords[idx].wordConfidence.toFixed(0)}%)`);
+          mnemonicWords[idx].original = mnemonicWords[idx].original || mnemonicWords[idx].word;
+          mnemonicWords[idx].word = candidate.word;
+          return true;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Try two-word substitution for the 3 lowest-confidence words
+  const suspectIndices = sortedIndices.slice(0, 3);
+  for (let a = 0; a < suspectIndices.length; a++) {
+    const idxA = suspectIndices[a];
+    const candidatesA = getBip39Candidates(mnemonicWords[idxA].original || mnemonicWords[idxA].word);
+
+    for (let b = a + 1; b < suspectIndices.length; b++) {
+      const idxB = suspectIndices[b];
+      const candidatesB = getBip39Candidates(mnemonicWords[idxB].original || mnemonicWords[idxB].word);
+
+      for (const cA of candidatesA) {
+        for (const cB of candidatesB) {
+          const testWords = [...words];
+          testWords[idxA] = cA.word;
+          testWords[idxB] = cB.word;
+          const testPhrase = testWords.join(' ');
+
+          try {
+            if (validateMnemonic(testPhrase, bip39English)) {
+              console.log(`[BIP39 AutoCorrect] Fixed 2 words: #${mnemonicWords[idxA].index} "${mnemonicWords[idxA].word}"->"${cA.word}", #${mnemonicWords[idxB].index} "${mnemonicWords[idxB].word}"->"${cB.word}"`);
+              mnemonicWords[idxA].original = mnemonicWords[idxA].original || mnemonicWords[idxA].word;
+              mnemonicWords[idxA].word = cA.word;
+              mnemonicWords[idxB].original = mnemonicWords[idxB].original || mnemonicWords[idxB].word;
+              mnemonicWords[idxB].word = cB.word;
+              return true;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+
+  console.log('[BIP39 AutoCorrect] Could not find valid mnemonic combination');
+  return false;
 }
 
 /**
@@ -283,8 +390,8 @@ function preprocessImageForOcr(
 /** Fixed OCR region of interest (ROI) for mnemonic recognition at X85Y0 position */
 const OCR_ROI = { x: 230, y: 440, width: 680, height: 1110 } as const;
 
-/** Verification page ROI: top region for "#N" number detection */
-const VERIFY_NUMBER_ROI = { x: 230, y: 440, width: 680, height: 200 } as const;
+/** Verification page ROI: focused region for "#N" number detection (tight crop around number area) */
+const VERIFY_NUMBER_ROI = { x: 230, y: 480, width: 400, height: 130 } as const;
 
 /** Verification page ROI: bottom region for 3 option words */
 const VERIFY_OPTIONS_ROI = { x: 230, y: 1100, width: 680, height: 450 } as const;
@@ -303,6 +410,7 @@ function CameraPanel() {
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
   const [storedMnemonic, setStoredMnemonic] = useState<StoredMnemonic | null>(null);
   const [capturedImageUrl, setCapturedImageUrl] = useState<string | null>(null);
+  const [numberImageUrl, setNumberImageUrl] = useState<string | null>(null);
   const ocrWorkerRef = useRef<Worker | null>(null);
 
   /**
@@ -390,7 +498,7 @@ function CameraPanel() {
    */
   const runOcrOnRegion = useCallback(async (
     roi: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
-  ): Promise<{ rawText: string; confidence: number; imageDataUrl: string } | null> => {
+  ): Promise<{ rawText: string; confidence: number; imageDataUrl: string; words: { text: string; confidence: number }[] } | null> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ocrCanvas = ocrCanvasRef.current;
@@ -433,8 +541,8 @@ function CameraPanel() {
     // Capture the cropped image as a data URL for display (original resolution)
     const imageDataUrl = cropCanvas.toDataURL('image/jpeg', 0.85);
 
-    // Upscale 2x for better OCR accuracy on small text
-    const scale = 2;
+    // Upscale 3x for better OCR accuracy on small text
+    const scale = 3;
     const scaledCanvas = document.createElement('canvas');
     scaledCanvas.width = roi.width * scale;
     scaledCanvas.height = roi.height * scale;
@@ -450,11 +558,114 @@ function CameraPanel() {
     const worker = await ensureOcrWorker();
     const result = await worker.recognize(ocrCanvas);
 
+    // Extract word-level data from Tesseract's nested structure
+    const ocrWords: { text: string; confidence: number }[] = [];
+    if (result.data.blocks) {
+      for (const block of result.data.blocks) {
+        for (const para of block.paragraphs) {
+          for (const line of para.lines) {
+            for (const word of line.words) {
+              ocrWords.push({ text: word.text, confidence: word.confidence });
+            }
+          }
+        }
+      }
+    }
+
     return {
       rawText: result.data.text,
       confidence: result.data.confidence,
       imageDataUrl,
+      words: ocrWords,
     };
+  }, [ensureOcrWorker]);
+
+  /**
+   * Captures a frame, crops to the number region, and runs OCR optimized for detecting
+   * a single number 1-12 (used for verification page "#N" detection).
+   * Uses 4x upscaling and digits-only whitelist for maximum accuracy.
+   */
+  const runNumberOcr = useCallback(async (): Promise<{ number: number; rawText: string; confidence: number; imageDataUrl: string } | null> => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ocrCanvas = ocrCanvasRef.current;
+
+    if (!video || !canvas || !ocrCanvas || video.readyState < 2) {
+      return null;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    // Rotate 90 degrees clockwise
+    canvas.width = video.videoHeight;
+    canvas.height = video.videoWidth;
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(video, -video.videoWidth / 2, -video.videoHeight / 2, video.videoWidth, video.videoHeight);
+    ctx.restore();
+
+    // Crop to tight number region
+    const roi = VERIFY_NUMBER_ROI;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = roi.width;
+    cropCanvas.height = roi.height;
+    const cropCtx = cropCanvas.getContext('2d');
+    if (!cropCtx) return null;
+    cropCtx.drawImage(canvas, roi.x, roi.y, roi.width, roi.height, 0, 0, roi.width, roi.height);
+
+    // Capture the cropped image for display
+    const imageDataUrl = cropCanvas.toDataURL('image/jpeg', 0.85);
+
+    // Upscale 4x for small number detection
+    const scale = 4;
+    const scaledCanvas = document.createElement('canvas');
+    scaledCanvas.width = roi.width * scale;
+    scaledCanvas.height = roi.height * scale;
+    const scaledCtx = scaledCanvas.getContext('2d');
+    if (!scaledCtx) return null;
+    scaledCtx.imageSmoothingEnabled = true;
+    scaledCtx.imageSmoothingQuality = 'high';
+    scaledCtx.drawImage(cropCanvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+
+    // Preprocess
+    preprocessImageForOcr(scaledCanvas, ocrCanvas);
+
+    // Use digits-only whitelist for number detection
+    const worker = await ensureOcrWorker();
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789# ',
+      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+    });
+
+    const result = await worker.recognize(ocrCanvas);
+
+    // Restore full whitelist for subsequent OCR calls
+    await worker.setParameters({
+      tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.# ',
+      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+    });
+
+    const rawText = result.data.text;
+    const confidence = result.data.confidence;
+
+    console.log(`[CameraPanel] Number OCR raw: "${rawText.trim()}", confidence: ${confidence.toFixed(0)}%`);
+
+    // Extract all digit sequences and find the first valid 1-12
+    const digitMatches = rawText.match(/\d+/g) || [];
+    let detectedNumber = -1;
+    for (const digits of digitMatches) {
+      const num = parseInt(digits, 10);
+      if (num >= 1 && num <= 12) {
+        detectedNumber = num;
+        break;
+      }
+    }
+
+    if (detectedNumber === -1) return null;
+
+    return { number: detectedNumber, rawText, confidence, imageDataUrl };
   }, [ensureOcrWorker]);
 
   /**
@@ -463,7 +674,7 @@ function CameraPanel() {
    * Returns the recognized mnemonic words or null if failed.
    */
   const runSingleOcr = useCallback(async (): Promise<{
-    mnemonicWords: { index: number; word: string; original?: string }[];
+    mnemonicWords: MnemonicWord[];
     rawText: string;
     confidence: number;
     imageDataUrl: string;
@@ -472,9 +683,18 @@ function CameraPanel() {
     const result = await runOcrOnRegion(OCR_ROI);
     if (!result) return null;
 
+    // Build a lookup: lowercase OCR word text -> Tesseract confidence
+    const wordConfidenceMap = new Map<string, number>();
+    for (const w of result.words) {
+      const clean = w.text.replace(/[^a-zA-Z]/g, '').toLowerCase();
+      if (clean.length >= 2) {
+        wordConfidenceMap.set(clean, w.confidence);
+      }
+    }
+
     // Extract numbered mnemonic words
     const mnemonicPattern = /(\d+)\.\s*([a-zA-Z]{3,12})/g;
-    const mnemonicWords: { index: number; word: string; original?: string }[] = [];
+    const mnemonicWords: MnemonicWord[] = [];
     let match;
 
     while ((match = mnemonicPattern.exec(result.rawText)) !== null) {
@@ -483,10 +703,13 @@ function CameraPanel() {
 
       // Auto-correct against BIP39 wordlist
       const correction = correctToBip39(ocrWord);
+      const wordConf = wordConfidenceMap.get(ocrWord) ?? result.confidence;
+
       mnemonicWords.push({
         index,
         word: correction.word,
         original: correction.corrected ? ocrWord : undefined,
+        wordConfidence: wordConf,
       });
     }
 
@@ -503,6 +726,15 @@ function CameraPanel() {
         bip39Valid = false;
       }
       console.log(`BIP39 validation: ${bip39Valid ? 'VALID' : 'INVALID'} - "${phrase}"`);
+
+      // If BIP39 invalid, attempt smart auto-correction on low-confidence words
+      if (!bip39Valid) {
+        const corrected = tryBip39AutoCorrect(mnemonicWords);
+        if (corrected) {
+          bip39Valid = true;
+          console.log(`BIP39 auto-correction succeeded!`);
+        }
+      }
     }
 
     return { mnemonicWords, bip39Valid, ...result };
@@ -527,7 +759,7 @@ function CameraPanel() {
 
     try {
       let bestResult: {
-        mnemonicWords: { index: number; word: string; original?: string }[];
+        mnemonicWords: MnemonicWord[];
         rawText: string;
         confidence: number;
         imageDataUrl: string;
@@ -672,11 +904,13 @@ function CameraPanel() {
           ? `✓ 已保存 ${bestResult.mnemonicWords.length} 个助记词:`
           : `识别到 ${bestResult.mnemonicWords.length} 个助记词 (预期 ${EXPECTED_MNEMONIC_COUNT} 个):`;
 
-        const wordLines = bestResult.mnemonicWords.map(item =>
-          item.original
-            ? `${item.index}. ${item.original} -> ${item.word} (corrected)`
-            : `${item.index}. ${item.word}`
-        ).join('\n');
+        const wordLines = bestResult.mnemonicWords.map((item) => {
+          const confTag = `[${item.wordConfidence.toFixed(0)}%]`;
+          if (item.original) {
+            return `${item.index}. ${item.original} -> ${item.word} (corrected) ${confTag}`;
+          }
+          return `${item.index}. ${item.word} ${confTag}`;
+        }).join('\n');
 
         const validationLine = hasFull
           ? `\nBIP39 checksum: ${bestResult.bip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
@@ -855,7 +1089,7 @@ function CameraPanel() {
       setIsOcrProcessing(true);
       setCapturedImageUrl(null);
 
-      let bestWords: { index: number; word: string; original?: string }[] = [];
+      let bestWords: MnemonicWord[] = [];
       let bestConfidence = 0;
       let bestImageDataUrl = '';
       let bestBip39Valid = false;
@@ -899,11 +1133,13 @@ function CameraPanel() {
           const hasCorrections = bestWords.some(w => w.original);
           const hasFull = bestWords.length >= EXPECTED_MNEMONIC_COUNT;
 
-          const wordLines = bestWords.map((w) =>
-            w.original
-              ? `${w.index}. ${w.original} -> ${w.word} (corrected)`
-              : `${w.index}. ${w.word}`
-          ).join('\n');
+          const wordLines = bestWords.map((w) => {
+            const confTag = `[${w.wordConfidence.toFixed(0)}%]`;
+            if (w.original) {
+              return `${w.index}. ${w.original} -> ${w.word} (corrected) ${confTag}`;
+            }
+            return `${w.index}. ${w.word} ${confTag}`;
+          }).join('\n');
 
           const validationLine = hasFull
             ? `\nBIP39 checksum: ${bestBip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
@@ -973,41 +1209,49 @@ function CameraPanel() {
       console.log('[CameraPanel] Verification OCR trigger received');
       setIsOcrProcessing(true);
       setCapturedImageUrl(null);
+      setNumberImageUrl(null);
 
       try {
-        // --- Pass 1: OCR on number region (top of screen) to detect "#N" ---
+        // --- Pass 1: Focused number OCR to detect "#N" (digits-only, 4x upscale) ---
         let wordIndex = -1;
+        let numberImageUrl = '';
+        let numberRawText = '';
+        let numberConfidence = 0;
         for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
           console.log(`[CameraPanel] Verify number OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
-          const numberResult = await runOcrOnRegion(VERIFY_NUMBER_ROI);
-          if (!numberResult) continue;
+          const numberResult = await runNumberOcr();
 
-          console.log(`[CameraPanel] Number region text: "${numberResult.rawText.trim()}", confidence: ${numberResult.confidence.toFixed(0)}%`);
-
-          // Try to extract word index from "#N" or standalone number
-          const indexPatterns = [
-            /#\s*(\d+)/,
-            /\b(\d{1,2})\b/,
-          ];
-          for (const pattern of indexPatterns) {
-            const match = numberResult.rawText.match(pattern);
-            if (match) {
-              const idx = parseInt(match[1], 10);
-              if (idx >= 1 && idx <= 12) {
-                wordIndex = idx;
-                break;
-              }
-            }
+          if (numberResult) {
+            wordIndex = numberResult.number;
+            numberImageUrl = numberResult.imageDataUrl;
+            numberRawText = numberResult.rawText.trim();
+            numberConfidence = numberResult.confidence;
+            console.log(`[CameraPanel] Detected #${wordIndex} (confidence: ${numberResult.confidence.toFixed(0)}%)`);
+            break;
           }
 
-          if (wordIndex >= 1) break;
+          // Even if number detection failed, keep the last image for debugging
+          if (!numberImageUrl) {
+            // Re-capture a frame just for the image (use runOcrOnRegion which returns imageDataUrl)
+            const fallbackResult = await runOcrOnRegion(VERIFY_NUMBER_ROI);
+            if (fallbackResult) {
+              numberImageUrl = fallbackResult.imageDataUrl;
+              numberRawText = fallbackResult.rawText.trim();
+              numberConfidence = fallbackResult.confidence;
+            }
+          }
 
           if (attempt < MAX_OCR_RETRIES) {
             await new Promise((resolve) => setTimeout(resolve, OCR_RETRY_DELAY));
           }
         }
 
-        console.log(`[CameraPanel] Detected word index: #${wordIndex}`);
+        // Show the number region image for debugging
+        if (numberImageUrl) {
+          setNumberImageUrl(numberImageUrl);
+        }
+
+        console.log(`[CameraPanel] Final detected word index: #${wordIndex}`);
 
         // --- Pass 2: OCR on options region (bottom of screen) to detect 3 words ---
         let optionsText = '';
@@ -1068,7 +1312,8 @@ function CameraPanel() {
         console.log(`[CameraPanel] Verify: word #${wordIndex}, correct="${correctWord}", options=[${matchedOptions.join(', ')}], optionIndex=${optionIndex}`);
 
         // Update display
-        let resultText = `验证单词 #${wordIndex}\n`;
+        let resultText = `验证单词 #${wordIndex}`;
+        resultText += ` (数字OCR: "${numberRawText}", 置信度: ${numberConfidence.toFixed(0)}%)\n`;
         resultText += `正确答案: ${correctWord?.toUpperCase() || '未知'}\n`;
         resultText += `识别选项: ${matchedOptions.join(', ')}\n`;
         if (optionIndex >= 0) {
@@ -1103,7 +1348,7 @@ function CameraPanel() {
 
     window.addEventListener('phonepilot:trigger-verify-ocr', handleTriggerVerifyOcr);
     return () => window.removeEventListener('phonepilot:trigger-verify-ocr', handleTriggerVerifyOcr);
-  }, [runOcrOnRegion, storedMnemonic]);
+  }, [runOcrOnRegion, runNumberOcr, storedMnemonic]);
 
   // Handle device selection change
   const handleDeviceChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -1193,14 +1438,37 @@ function CameraPanel() {
             </span>
             <button
               className="ocr-result-close"
-              onClick={() => { setOcrResult(null); setCapturedImageUrl(null); }}
+              onClick={() => { setOcrResult(null); setCapturedImageUrl(null); setNumberImageUrl(null); }}
               title="关闭"
             >
               ×
             </button>
           </div>
+          {numberImageUrl && (
+            <div className="ocr-result-image-wrapper">
+              <div className="ocr-result-image-label">数字区域截图</div>
+              <img
+                src={numberImageUrl}
+                alt="数字区域截图"
+                className="ocr-result-image"
+              />
+              <button
+                className="ocr-result-save-btn"
+                onClick={() => {
+                  const link = document.createElement('a');
+                  link.href = numberImageUrl;
+                  link.download = `ocr-number-${Date.now()}.jpg`;
+                  link.click();
+                }}
+                title="保存数字截图到本地"
+              >
+                保存数字截图
+              </button>
+            </div>
+          )}
           {capturedImageUrl && (
             <div className="ocr-result-image-wrapper">
+              {numberImageUrl && <div className="ocr-result-image-label">选项区域截图</div>}
               <img
                 src={capturedImageUrl}
                 alt="OCR 识别截图"

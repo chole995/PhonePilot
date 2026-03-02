@@ -15,8 +15,8 @@ export const ARM_CONTROLLER_CONFIG = {
   deviceReadyDelay: 2000,
   /** Delay between sequential commands (ms) */
   commandDelay: 300,
-  /** Delay for click operation (ms) */
-  clickDelay: 250,
+  /** Delay for click operation (ms). Lower = faster steps; increase if taps are missed. */
+  clickDelay: 150,
   /** Available step size options */
   stepOptions: [1, 5, 10, 20] as const,
   /** Default step size for movement */
