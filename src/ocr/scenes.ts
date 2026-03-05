@@ -2,7 +2,8 @@ import type { OcrSceneConfig } from './types';
 
 /** Mnemonic phrase page (12-word create-wallet): focus only on the 2-column word grid. */
 export const MNEMONIC_SCENE: OcrSceneConfig = {
-  roi: { x: 250, y: 640, width: 620, height: 670 },
+  // Further expand upward for 24-word flow so top rows are fully captured.
+  roi: { x: 250, y: 430, width: 620, height: 930 },
   scale: 5,
   useNearestNeighbor: true,
 };

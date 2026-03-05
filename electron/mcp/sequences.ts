@@ -309,7 +309,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     group: '初始设置',
     steps: [
       { label: '点击继续', x: 55, y: 85, depth: 12 },
-      { label: '点击稍后设置', x: 55, y: 85, depth: 12 },
+      { label: '点击稍后设置', x: 55, y: 85, depth: 12, delayAfter: 500 },
     ],
   },
 
@@ -413,7 +413,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '创建钱包选择18词',
     group: '创建钱包',
     steps: [
-      { label: '展开助记词位数', x: 55, y: 25, depth: 12, delayAfter: 600 },
+      { label: '展开助记词位数', x: 56, y: 23, depth: 12, delayAfter: 600 },
       { label: '选择18词', x: 40, y: 55, depth: 12, delayAfter: 800 },
     ],
   },
@@ -422,7 +422,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '创建钱包选择24词',
     group: '创建钱包',
     steps: [
-      { label: '展开助记词位数', x: 55, y: 25, depth: 12, delayAfter: 600 },
+      { label: '展开助记词位数', x: 56, y: 23, depth: 12, delayAfter: 600 },
       { label: '选择24词', x: 40, y: 65, depth: 12, delayAfter: 800 },
     ],
   },

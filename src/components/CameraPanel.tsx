@@ -117,6 +117,7 @@ interface MnemonicWord {
 /** Stored mnemonic words from previous recognition */
 interface StoredMnemonic {
   words: string[];
+  confidences?: number[];
   timestamp: Date;
 }
 
@@ -638,13 +639,23 @@ function CameraPanel() {
   const [numberPreOcrImageUrl, setNumberPreOcrImageUrl] = useState<string | null>(null);
   const ocrWorkerRef = useRef<Worker | null>(null);
 
-  const saveStoredMnemonic = useCallback((words: string[]) => {
-    const payload: StoredMnemonic = { words, timestamp: new Date() };
+  const saveStoredMnemonic = useCallback((words: string[], confidences?: number[]) => {
+    const normalizedConfidences = Array.isArray(confidences) && confidences.length === words.length
+      ? confidences.map((value) => {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
+        return Math.min(100, value);
+      })
+      : undefined;
+    const payload: StoredMnemonic = { words, confidences: normalizedConfidences, timestamp: new Date() };
     setStoredMnemonic(payload);
     try {
       localStorage.setItem(
         STORED_MNEMONIC_KEY,
-        JSON.stringify({ words: payload.words, timestamp: payload.timestamp.toISOString() })
+        JSON.stringify({
+          words: payload.words,
+          confidences: payload.confidences,
+          timestamp: payload.timestamp.toISOString(),
+        })
       );
     } catch (err) {
       console.warn('Failed to persist mnemonic locally:', err);
@@ -665,13 +676,16 @@ function CameraPanel() {
     try {
       const raw = localStorage.getItem(STORED_MNEMONIC_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as { words?: unknown; timestamp?: unknown };
+      const parsed = JSON.parse(raw) as { words?: unknown; confidences?: unknown; timestamp?: unknown };
       if (!Array.isArray(parsed.words) || parsed.words.length === 0) return;
       const words = parsed.words.filter((w): w is string => typeof w === 'string');
       if (words.length === 0) return;
+      const confidences = Array.isArray(parsed.confidences)
+        ? parsed.confidences.map((value) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0))
+        : undefined;
       const timestamp =
         typeof parsed.timestamp === 'string' ? new Date(parsed.timestamp) : new Date();
-      setStoredMnemonic({ words, timestamp });
+      setStoredMnemonic({ words, confidences, timestamp });
     } catch (err) {
       console.warn('Failed to restore mnemonic from local storage:', err);
     }
@@ -2148,12 +2162,6 @@ function CameraPanel() {
           }
         }
 
-        const indexedToWords = (items: MnemonicWord[]): string[] =>
-          items
-            .slice()
-            .sort((a, b) => a.index - b.index)
-            .map((item) => item.word);
-
         const indexedToMap = (items: MnemonicWord[]): Map<number, string> => {
           const map = new Map<number, string>();
           items.forEach((item) => {
@@ -2162,16 +2170,6 @@ function CameraPanel() {
             }
           });
           return map;
-        };
-
-        const buildContiguousWords = (wordMap: Map<number, string>): string[] => {
-          const output: string[] = [];
-          for (let i = 1; i <= expectedWordCount; i++) {
-            const word = wordMap.get(i);
-            if (!word) break;
-            output.push(word);
-          }
-          return output;
         };
 
         const buildSparseWords = (wordMap: Map<number, string>): string[] =>
@@ -2187,9 +2185,8 @@ function CameraPanel() {
           return missing;
         };
 
-        let words = indexedToWords(bestWords);
         let effectiveMissingIndices = [...bestMissingIndices];
-        let mergedWordMap: Map<number, string> | null = null;
+        let finalWordMap = indexedToMap(bestWords);
         if (mergeWithStored && bestWords.length > 0) {
           const mergedByIndex = new Map<number, string>();
           const useStoredMergeBase = !allowPartial;
@@ -2201,9 +2198,8 @@ function CameraPanel() {
           for (const item of bestWords) {
             mergedByIndex.set(item.index, item.word);
           }
-          mergedWordMap = mergedByIndex;
-          words = buildContiguousWords(mergedByIndex);
-          effectiveMissingIndices = collectMissingIndices(mergedByIndex);
+          finalWordMap = mergedByIndex;
+          effectiveMissingIndices = collectMissingIndices(finalWordMap);
         } else if (mergeWithStored && bestWords.length === 0 && storedMnemonic?.words?.length) {
           const storedMap = indexedToMap(
             storedMnemonic.words.map((word, idx) => ({
@@ -2212,11 +2208,25 @@ function CameraPanel() {
               wordConfidence: 0,
             }))
           );
-          mergedWordMap = storedMap;
-          words = buildContiguousWords(storedMap);
-          effectiveMissingIndices = collectMissingIndices(storedMap);
+          finalWordMap = storedMap;
+          effectiveMissingIndices = collectMissingIndices(finalWordMap);
         }
 
+        const words = buildSparseWords(finalWordMap);
+        const recognizedCount = finalWordMap.size;
+        const finalConfidenceByIndex = new Map<number, number>();
+        if (mergeWithStored && Array.isArray(storedMnemonic?.confidences)) {
+          storedMnemonic.confidences.forEach((value, idx) => {
+            if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+              finalConfidenceByIndex.set(idx + 1, value);
+            }
+          });
+        }
+        bestWords.forEach((item) => {
+          if (Number.isFinite(item.wordConfidence) && item.wordConfidence > 0) {
+            finalConfidenceByIndex.set(item.index, item.wordConfidence);
+          }
+        });
         const hasFull = mergeWithStored
           ? effectiveMissingIndices.length === 0
           : bestHasCompleteSequence;
@@ -2230,20 +2240,30 @@ function CameraPanel() {
         }
 
         // Update local CameraPanel display
-        if (bestWords.length > 0) {
+        if (recognizedCount > 0) {
           // Display the captured image
           setCapturedImageUrl(bestImageDataUrl);
           setPreOcrImageUrl(bestPreOcrImageDataUrl);
 
           const hasCorrections = bestWords.some(w => w.original);
+          const bestWordsByIndex = new Map<number, MnemonicWord>();
+          bestWords.forEach((item) => bestWordsByIndex.set(item.index, item));
 
-          const wordLines = bestWords.map((w) => {
-            const confTag = `[${w.wordConfidence.toFixed(0)}%]`;
-            if (w.original) {
-              return `${w.index}. ${w.original} -> ${w.word} (corrected) ${confTag}`;
-            }
-            return `${w.index}. ${w.word} ${confTag}`;
-          }).join('\n');
+          const wordLines = Array.from(finalWordMap.entries())
+            .sort((a, b) => a[0] - b[0])
+            .map(([index, word]) => {
+              const currentCapture = bestWordsByIndex.get(index);
+              const confidence = finalConfidenceByIndex.get(index);
+              const confTag = typeof confidence === 'number' ? `[${confidence.toFixed(0)}%]` : '';
+              if (currentCapture) {
+                if (currentCapture.original) {
+                  return `${index}. ${currentCapture.original} -> ${word} (corrected) ${confTag}`;
+                }
+                return `${index}. ${word} ${confTag}`;
+              }
+              return confTag ? `${index}. ${word} ${confTag}` : `${index}. ${word}`;
+            })
+            .join('\n');
 
           const missingLine = hasFull
             ? ''
@@ -2253,33 +2273,40 @@ function CameraPanel() {
             : '';
 
           setOcrResult({
-            text: `✓ 自动识别到 ${bestWords.length} 个助记词:\n${wordLines}${missingLine}${validationLine}`,
+            text: `✓ 自动识别到 ${recognizedCount} 个助记词:\n${wordLines}${missingLine}${validationLine}`,
             confidence: bestConfidence,
             timestamp: new Date(),
           });
 
-          if (mergeWithStored && mergedWordMap && mergedWordMap.size > 0) {
-            const sparseStoredWords = buildSparseWords(mergedWordMap);
-            saveStoredMnemonic(sparseStoredWords);
+          if (mergeWithStored && finalWordMap.size > 0) {
+            const sparseConfidences = Array.from(
+              { length: expectedWordCount },
+              (_, idx) => finalConfidenceByIndex.get(idx + 1) ?? 0
+            );
+            saveStoredMnemonic(words, sparseConfidences);
             if (allowPartial) {
-              const partialIndices = Array.from(mergedWordMap.keys()).sort((a, b) => a - b);
+              const partialIndices = Array.from(finalWordMap.keys()).sort((a, b) => a - b);
               console.log(`[CameraPanel] Stored partial mnemonic indices: ${partialIndices.join(', ')}`);
             }
           } else if (hasFull && finalBip39Valid) {
-            saveStoredMnemonic(words);
+            const sparseConfidences = Array.from(
+              { length: expectedWordCount },
+              (_, idx) => finalConfidenceByIndex.get(idx + 1) ?? 0
+            );
+            saveStoredMnemonic(words, sparseConfidences);
           }
         }
 
         const triggerSuccess = allowPartial
-          ? words.length > 0
+          ? recognizedCount > 0
           : (hasFull && (!requireBip39 || finalBip39Valid));
         let triggerReason: string | undefined;
         if (!triggerSuccess) {
-          if (words.length === 0) {
+          if (recognizedCount === 0) {
             triggerReason = 'No mnemonic words recognized';
           } else if (!hasFull) {
             triggerReason =
-              `Incomplete mnemonic words: ${words.length}/${expectedWordCount}` +
+              `Incomplete mnemonic words: ${recognizedCount}/${expectedWordCount}` +
               (effectiveMissingIndices.length > 0
                 ? ` (missing indices: ${effectiveMissingIndices.join(', ')})`
                 : '');

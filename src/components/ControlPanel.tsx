@@ -521,13 +521,15 @@ function ControlPanel() {
             ),
           ]);
 
+          const latestWords = Array.isArray(ocrResult.words) ? ocrResult.words : [];
+          setState(prev => ({ ...prev, capturedWords: latestWords }));
+          addLog('OCR', `识别到 ${latestWords.filter((word) => !!word).length}/${latestWords.length} 个单词: ${latestWords.join(', ')}`);
+
           const allowPartial = !!ocrCaptureConfig.allowPartial;
           const canContinueWithPartial = allowPartial && ocrResult.words.length > 0;
           if ((!ocrResult.success && !canContinueWithPartial) || ocrResult.words.length === 0) {
             throw new Error(`助记词OCR失败: ${ocrResult.reason || 'no words recognized'}`);
           }
-          setState(prev => ({ ...prev, capturedWords: ocrResult.words }));
-          addLog('OCR', `识别到 ${ocrResult.words.length} 个单词: ${ocrResult.words.join(', ')}`);
         } else if (step.swipeTo) {
           // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
           await sendCommand({
@@ -614,6 +616,7 @@ function ControlPanel() {
 
   const categorySequences = getSequencesByCategory(state.selectedCategory);
   const runningSequence = OPERATION_SEQUENCES.find(s => s.id === state.selectedSequenceId);
+  const capturedFilledCount = state.capturedWords.filter((word) => !!word).length;
 
   return (
     <div className="control-panel">
@@ -772,7 +775,7 @@ function ControlPanel() {
         <div className="captured-words-section">
           <div className="captured-words-header">
             <h3>识别到的助记词</h3>
-            <span className="captured-words-count">{state.capturedWords.length} 个</span>
+            <span className="captured-words-count">{capturedFilledCount}/{state.capturedWords.length} 个</span>
           </div>
           <div className="captured-words-grid">
             {state.capturedWords.map((word, i) => (
