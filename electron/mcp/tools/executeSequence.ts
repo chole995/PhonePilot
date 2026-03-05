@@ -9,12 +9,17 @@ import {
   updateArmState,
   buildArmApiUrl,
   captureFrame,
+  capturePreOcrFrame,
+  runMnemonicOcr,
+  runVerifyOcr,
+  storeMnemonicWords,
   delay,
   ARM_CONFIG,
   shouldStopSequenceExecution,
   setStopSequenceFlag,
 } from '../state';
 import { getSequence, getFullSteps, getAllSequenceIds } from '../sequences';
+import { saveCaptureToDownloads } from '../../saveCapture';
 
 import type { AutoStep } from '../sequences';
 
@@ -51,6 +56,7 @@ async function executeStep(
   httpRequest: (url: string) => Promise<string>
 ): Promise<void> {
   if (step.ocrCapture) {
+    const ocrCaptureConfig = typeof step.ocrCapture === 'object' ? step.ocrCapture : {};
     // OCR capture step: move arm out of the way without clicking
     const moveUrl = buildArmApiUrl({
       duankou: '0',
@@ -65,11 +71,109 @@ async function executeStep(
       currentY: step.y,
     });
 
-    // Wait for arm to settle, then capture frame for OCR
+    // Wait for arm to settle, then run OCR capture in renderer.
     await delay(1000);
-    const frame = await captureFrame();
-    if (frame) {
-      console.log('[execute-sequence] OCR capture frame taken at', step.x, step.y);
+
+    const ocrResult = await runMnemonicOcr(ocrCaptureConfig);
+    if (!ocrResult) {
+      throw new Error('Renderer did not return mnemonic OCR result');
+    }
+    const allowPartial = !!ocrCaptureConfig.allowPartial;
+    const canContinueWithPartial = allowPartial && ocrResult.words.length > 0;
+    if ((!ocrResult.success && !canContinueWithPartial) || ocrResult.words.length === 0) {
+      throw new Error(`Mnemonic OCR failed: ${ocrResult.reason || 'no words recognized'}`);
+    }
+
+    storeMnemonicWords(
+      ocrResult.words,
+      canContinueWithPartial ? 'sequence-ocr-partial' : 'sequence-ocr'
+    );
+
+    // Optional debug artifact: save the current OCR-input image.
+    const preOcrFrame = await capturePreOcrFrame();
+    if (preOcrFrame) {
+      try {
+        await saveCaptureToDownloads(preOcrFrame, `ocr-x${step.x}-y${step.y}`);
+      } catch (err) {
+        console.warn('[execute-sequence] Failed to save OCR debug capture:', err);
+      }
+    }
+  } else if (step.ocrVerify) {
+    // Verification step: move to observation position, run verify OCR, then click chosen option.
+    const moveUrl = buildArmApiUrl({
+      duankou: '0',
+      hco: resourceHandle,
+      daima: `X${step.x}Y${step.y}`,
+    });
+    await httpRequest(moveUrl);
+
+    updateArmState({
+      currentX: step.x,
+      currentY: step.y,
+    });
+
+    await delay(1000);
+
+    const verifyResult = await runVerifyOcr();
+    if (!verifyResult) {
+      throw new Error('Renderer did not return verify OCR result');
+    }
+    if (!verifyResult.success) {
+      throw new Error(`Verify OCR failed: ${verifyResult.reason || 'unknown reason'}`);
+    }
+    if (
+      verifyResult.optionIndex < 0
+      || verifyResult.optionIndex >= step.ocrVerify.options.length
+    ) {
+      throw new Error(
+        `Verify OCR returned invalid optionIndex=${verifyResult.optionIndex} for ${step.ocrVerify.options.length} options`
+      );
+    }
+
+    const option = step.ocrVerify.options[verifyResult.optionIndex];
+
+    const moveToOptionUrl = buildArmApiUrl({
+      duankou: '0',
+      hco: resourceHandle,
+      daima: `X${option.x}Y${option.y}`,
+    });
+    await httpRequest(moveToOptionUrl);
+
+    const lowerUrl = buildArmApiUrl({
+      duankou: '0',
+      hco: resourceHandle,
+      daima: `Z${option.depth}`,
+    });
+    await httpRequest(lowerUrl);
+
+    await delay(ARM_CONFIG.clickDelay);
+
+    const raiseUrl = buildArmApiUrl({
+      duankou: '0',
+      hco: resourceHandle,
+      daima: `Z${ARM_CONFIG.zUp}`,
+    });
+    await httpRequest(raiseUrl);
+
+    updateArmState({
+      currentX: option.x,
+      currentY: option.y,
+    });
+
+    console.log(
+      `[execute-sequence] Verify word #${verifyResult.wordIndex}: option ${verifyResult.optionIndex + 1}, correct=${verifyResult.correctWord}`
+    );
+    if (Array.isArray(verifyResult.mnemonicWords) && verifyResult.mnemonicWords.length > 0) {
+      console.log(
+        '[execute-sequence] Mnemonic list:',
+        verifyResult.mnemonicWords.map((word, idx) => `${idx + 1}.${word}`).join(', ')
+      );
+    }
+    if (verifyResult.rawOptions.length > 0) {
+      console.log('[execute-sequence] Verify raw options:', verifyResult.rawOptions.join(', '));
+    }
+    if (verifyResult.matchedOptions.length > 0) {
+      console.log('[execute-sequence] Verify mapped options:', verifyResult.matchedOptions.join(', '));
     }
   } else if (step.swipeTo) {
     // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
@@ -143,8 +247,8 @@ async function executeStep(
     });
   }
 
-  // Wait after step (default 175ms for faster sequence execution)
-  await delay(step.delayAfter ?? 175);
+  // Wait after step (default 250ms for faster sequence execution)
+  await delay(step.delayAfter ?? 250);
 }
 
 /**

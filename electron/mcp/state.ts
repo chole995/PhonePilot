@@ -48,8 +48,50 @@ let armState: ArmState = {
 /** Frame capture callback type */
 type FrameCaptureCallback = () => Promise<string | null>;
 
+/** OCR-input image capture callback (returns data URL or base64 of the image sent to OCR) */
+type PreOcrCaptureCallback = () => Promise<string | null>;
+
+/** OCR capture result from renderer */
+export interface MnemonicOcrResult {
+  success: boolean;
+  words: string[];
+  confidence: number;
+  expectedWordCount?: number;
+  hasCompleteSequence?: boolean;
+  bip39Valid?: boolean;
+  reason?: string;
+}
+
+/** OCR capture request options (passed to renderer). */
+export interface MnemonicOcrRequest {
+  expectedWordCount?: number;
+  mergeWithStored?: boolean;
+  allowPartial?: boolean;
+  requireBip39?: boolean;
+}
+
+/** Verify-page OCR result from renderer */
+export interface VerifyOcrResult {
+  success: boolean;
+  wordIndex: number;
+  optionIndex: number;
+  correctWord: string;
+  rawOptions: string[];
+  matchedOptions: string[];
+  mnemonicWords?: string[];
+  reason?: string;
+}
+
+type MnemonicOcrCallback = (request?: MnemonicOcrRequest) => Promise<MnemonicOcrResult | null>;
+type VerifyOcrCallback = () => Promise<VerifyOcrResult | null>;
+
 /** Frame capture function (set by main process when renderer is ready) */
 let frameCaptureCallback: FrameCaptureCallback | null = null;
+
+/** OCR-input capture function (set by main process when renderer is ready) */
+let preOcrCaptureCallback: PreOcrCaptureCallback | null = null;
+let mnemonicOcrCallback: MnemonicOcrCallback | null = null;
+let verifyOcrCallback: VerifyOcrCallback | null = null;
 
 /** MCP Log entry type */
 export interface McpLogEntry {
@@ -124,6 +166,50 @@ export async function captureFrame(): Promise<string | null> {
     return null;
   }
   return frameCaptureCallback();
+}
+
+/**
+ * Sets the OCR-input image capture callback.
+ * Used by main process to request the image that will be sent to the OCR library (cropped and scaled).
+ */
+export function setPreOcrCaptureCallback(callback: PreOcrCaptureCallback): void {
+  preOcrCaptureCallback = callback;
+}
+
+/**
+ * Captures the OCR-input image (same pipeline as recognition: crop ROI + scale).
+ * Returns data URL or base64 of the image that would be sent to the OCR library, or null.
+ */
+export async function capturePreOcrFrame(): Promise<string | null> {
+  if (!preOcrCaptureCallback) {
+    console.warn('OCR-input capture callback not set');
+    return null;
+  }
+  return preOcrCaptureCallback();
+}
+
+export function setMnemonicOcrCallback(callback: MnemonicOcrCallback): void {
+  mnemonicOcrCallback = callback;
+}
+
+export async function runMnemonicOcr(request?: MnemonicOcrRequest): Promise<MnemonicOcrResult | null> {
+  if (!mnemonicOcrCallback) {
+    console.warn('Mnemonic OCR callback not set');
+    return null;
+  }
+  return mnemonicOcrCallback(request);
+}
+
+export function setVerifyOcrCallback(callback: VerifyOcrCallback): void {
+  verifyOcrCallback = callback;
+}
+
+export async function runVerifyOcr(): Promise<VerifyOcrResult | null> {
+  if (!verifyOcrCallback) {
+    console.warn('Verify OCR callback not set');
+    return null;
+  }
+  return verifyOcrCallback();
 }
 
 /**

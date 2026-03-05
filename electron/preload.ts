@@ -1,5 +1,40 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+interface MnemonicOcrPayload {
+  success: boolean;
+  words: string[];
+  confidence: number;
+  expectedWordCount?: number;
+  hasCompleteSequence?: boolean;
+  bip39Valid?: boolean;
+  reason?: string;
+}
+
+interface MnemonicOcrRequestPayload {
+  expectedWordCount?: number;
+  mergeWithStored?: boolean;
+  allowPartial?: boolean;
+  requireBip39?: boolean;
+}
+
+interface VerifyOcrPayload {
+  success: boolean;
+  wordIndex: number;
+  optionIndex: number;
+  correctWord: string;
+  rawOptions: string[];
+  matchedOptions: string[];
+  mnemonicWords?: string[];
+  reason?: string;
+}
+
+interface PaddleOcrEnPayload {
+  text: string;
+  confidence: number;
+  backend: 'en_PP-OCRv5_mobile_rec';
+  elapsedMs: number;
+}
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -48,10 +83,67 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('mcp-capture-frame-response', frame);
   },
 
+  // Pre-OCR image capture: Listen for request from main process
+  onCapturePreOcrRequest: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('capture-pre-ocr-request', handler);
+    return () => {
+      ipcRenderer.removeListener('capture-pre-ocr-request', handler);
+    };
+  },
+
+  // Pre-OCR image capture: Send pre-OCR image (data URL) back to main process
+  sendCapturePreOcrResponse: (payload: string | null) => {
+    ipcRenderer.send('capture-pre-ocr-response', payload);
+  },
+
+  onMcpOcrRequest: (callback: (payload?: MnemonicOcrRequestPayload | null) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload?: MnemonicOcrRequestPayload | null) =>
+      callback(payload);
+    ipcRenderer.on('mcp-ocr-request', handler);
+    return () => {
+      ipcRenderer.removeListener('mcp-ocr-request', handler);
+    };
+  },
+
+  sendMcpOcrResponse: (payload: MnemonicOcrPayload | null) => {
+    ipcRenderer.send('mcp-ocr-response', payload);
+  },
+
+  onMcpVerifyOcrRequest: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('mcp-verify-ocr-request', handler);
+    return () => {
+      ipcRenderer.removeListener('mcp-verify-ocr-request', handler);
+    };
+  },
+
+  sendMcpVerifyOcrResponse: (payload: VerifyOcrPayload | null) => {
+    ipcRenderer.send('mcp-verify-ocr-response', payload);
+  },
+
   // MCP Server status notification
   onMcpServerReady: (callback: (info: { port: number }) => void) => {
     ipcRenderer.on('mcp-server-ready', (_event, info) => callback(info));
   },
+
+  // Save capture (base64 or data URL) to Downloads folder
+  saveCaptureToDownloads: (dataUrlOrBase64: string, hint: string) =>
+    ipcRenderer.invoke('save-capture-to-downloads', {
+      dataUrlOrBase64,
+      hint,
+    }),
+
+  paddleOcrEnRecognize: (
+    imageDataUrl: string,
+    layoutHint?: 'mnemonic' | 'verify-options' | 'verify-number' | 'generic',
+    expectedWordCount?: number
+  ) =>
+    ipcRenderer.invoke('paddleocr-en-recognize', {
+      imageDataUrl,
+      layoutHint,
+      expectedWordCount,
+    }) as Promise<PaddleOcrEnPayload>,
 
   // MCP Log: Receive log entries from main process
   onMcpLog: (
@@ -96,6 +188,18 @@ declare global {
       // MCP Frame capture
       onCaptureFrameRequest: (callback: () => void) => () => void;
       sendCaptureFrameResponse: (frame: string | null) => void;
+      onCapturePreOcrRequest: (callback: () => void) => () => void;
+      sendCapturePreOcrResponse: (payload: string | null) => void;
+      onMcpOcrRequest: (callback: (payload?: MnemonicOcrRequestPayload | null) => void) => () => void;
+      sendMcpOcrResponse: (payload: MnemonicOcrPayload | null) => void;
+      onMcpVerifyOcrRequest: (callback: () => void) => () => void;
+      sendMcpVerifyOcrResponse: (payload: VerifyOcrPayload | null) => void;
+      saveCaptureToDownloads: (dataUrlOrBase64: string, hint: string) => Promise<string>;
+      paddleOcrEnRecognize: (
+        imageDataUrl: string,
+        layoutHint?: 'mnemonic' | 'verify-options' | 'verify-number' | 'generic',
+        expectedWordCount?: number
+      ) => Promise<PaddleOcrEnPayload>;
       onMcpServerReady: (callback: (info: { port: number }) => void) => void;
       // MCP Logs
       onMcpLog: (callback: (log: McpLogPayload) => void) => () => void;

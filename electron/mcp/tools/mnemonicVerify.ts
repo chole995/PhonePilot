@@ -84,7 +84,7 @@ export async function executeMnemonicVerify(
   if (!hasMnemonicWords()) {
     return {
       success: false,
-      message: 'No mnemonic words stored. Please capture and store mnemonic words first using ocr-recognize with extractMnemonic=true, then mnemonic-store.',
+      message: 'No mnemonic words stored. Please run mnemonic OCR flow first (for example execute-sequence with OCR steps), or set words via mnemonic-store.',
     };
   }
 

@@ -2,7 +2,98 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { createWorker, Worker, PSM } from 'tesseract.js';
 import { validateMnemonic } from '@scure/bip39';
 import { wordlist as bip39English } from '@scure/bip39/wordlists/english.js';
+import {
+  rotateVideoFrameToCanvas,
+  cropToROI,
+  scaleCanvas,
+  MNEMONIC_SCENE,
+  VERIFY_NUMBER_SCENE,
+  VERIFY_OPTIONS_SCENE,
+  type OcrSceneConfig,
+} from '../ocr';
 import './CameraPanel.css';
+
+/** JPEG quality for OCR-input and crop images (higher = clearer). */
+const OCR_JPEG_QUALITY = 0.92;
+/** Max side for PaddleOCR input to keep inference latency stable. */
+const PADDLE_MAX_IMAGE_SIDE = 1280;
+const STORED_MNEMONIC_KEY = 'phonepilot:stored-mnemonic:v1';
+const ENABLE_CHECKSUM_GUIDED_AUTOCORRECT = false;
+// Production flow should keep this disabled; enabling it forces OCR capture to return failure for debug only.
+const RAW_MNEMONIC_OCR_DEBUG_ONLY = false;
+const OCR_BACKEND: 'tesseract' | 'paddleocr_en' = 'paddleocr_en';
+const BASE_OCR_CHAR_WHITELIST = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.# ';
+const BASE_OCR_PARAMS = {
+  tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+  tessedit_char_whitelist: BASE_OCR_CHAR_WHITELIST,
+  preserve_interword_spaces: '1',
+  user_defined_dpi: '300',
+  tessjs_create_hocr: '0',
+  tessjs_create_tsv: '0',
+} as const;
+const MNEMONIC_OCR_PARAMS = {
+  ...BASE_OCR_PARAMS,
+  // Two-column mnemonic grid fits sparse text segmentation better than strict single-block.
+  tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+} as const;
+const MNEMONIC_COLUMN_OCR_PARAMS = {
+  ...BASE_OCR_PARAMS,
+  tessedit_pageseg_mode: PSM.SINGLE_COLUMN,
+} as const;
+const NUMBER_OCR_PARAMS = {
+  ...BASE_OCR_PARAMS,
+  tessedit_pageseg_mode: PSM.SINGLE_LINE,
+  tessedit_char_whitelist: '0123456789# ',
+} as const;
+type OcrParams = Record<string, string | number>;
+type OcrWord = {
+  text: string;
+  confidence: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+function formatRawOcrDebugText(rawText: string, words: OcrWord[]): string {
+  const trimmedRaw = rawText.trim();
+  const hasWordBoxes = words.some((item) => item.w > 0 || item.h > 0);
+  const wordLines = words
+    .map((item, idx) => {
+      const text = item.text.trim() || '(empty)';
+      if (!hasWordBoxes) {
+        return `${idx + 1}. ${text} [${item.confidence.toFixed(0)}%]`;
+      }
+      return `${idx + 1}. ${text} [${item.confidence.toFixed(0)}%] @(${Math.round(item.x)}, ${Math.round(item.y)})`;
+    })
+    .join('\n');
+
+  return [
+    '原始 OCR 文本:',
+    trimmedRaw || '(empty)',
+    '',
+    hasWordBoxes ? '词框明细:' : '词框明细: 当前后端仅返回行级文本，不返回词框坐标',
+    '',
+    `原始 OCR 词框 (${words.length}):`,
+    wordLines || '(none)',
+  ].join('\n');
+}
+
+function buildFallbackWordsFromText(rawText: string, confidence: number): OcrWord[] {
+  const tokens = rawText
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+
+  return tokens.map((token) => ({
+    text: token,
+    confidence,
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+  }));
+}
 
 interface VideoDevice {
   deviceId: string;
@@ -27,6 +118,161 @@ interface MnemonicWord {
 interface StoredMnemonic {
   words: string[];
   timestamp: Date;
+}
+
+interface OcrTriggerOptions {
+  expectedWordCount?: number;
+  mergeWithStored?: boolean;
+  allowPartial?: boolean;
+  requireBip39?: boolean;
+}
+
+function parseMnemonicIndexToken(token: string, expectedWordCount: number): number {
+  const cleaned = token.replace(/[^0-9A-Za-z|!]/g, '');
+  if (!cleaned) return -1;
+
+  // Conservative confusion mapping for index tokens only.
+  // Examples: "l2" -> 12, "I3" -> 13, "#O8" -> 8.
+  const normalized = cleaned
+    .replace(/[Iil|!]/g, '1')
+    .replace(/[OoQq]/g, '0');
+
+  if (!/^\d{1,2}$/.test(normalized)) return -1;
+  const value = parseInt(normalized, 10);
+  if (!Number.isFinite(value)) return -1;
+  if (value < 1 || value > expectedWordCount) return -1;
+  return value;
+}
+
+function buildMnemonicSceneCandidates(
+  baseScene: OcrSceneConfig,
+  expectedWordCount: number
+): OcrSceneConfig[] {
+  if (expectedWordCount <= 12) {
+    return [baseScene];
+  }
+
+  const candidates: OcrSceneConfig[] = [];
+  const seen = new Set<string>();
+  const add = (scene: OcrSceneConfig) => {
+    const normalized: OcrSceneConfig = {
+      ...scene,
+      roi: {
+        x: Math.max(0, Math.round(scene.roi.x)),
+        y: Math.max(0, Math.round(scene.roi.y)),
+        width: Math.max(80, Math.round(scene.roi.width)),
+        height: Math.max(80, Math.round(scene.roi.height)),
+      },
+      scale: Math.max(1, Math.round(scene.scale)),
+    };
+    const key =
+      `${normalized.roi.x}:${normalized.roi.y}:` +
+      `${normalized.roi.width}:${normalized.roi.height}:` +
+      `${normalized.scale}:${normalized.useNearestNeighbor ? 1 : 0}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(normalized);
+  };
+
+  if (expectedWordCount >= 24) {
+    // 24-word part1 needs stronger top coverage (first rows are easy to clip).
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x - 40),
+        y: Math.max(0, baseScene.roi.y - 240),
+        width: baseScene.roi.width + 80,
+        height: baseScene.roi.height + 620,
+      },
+      scale: 4,
+    });
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x - 28),
+        y: Math.max(0, baseScene.roi.y - 180),
+        width: baseScene.roi.width + 56,
+        height: baseScene.roi.height + 500,
+      },
+      scale: 4,
+    });
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x - 16),
+        y: Math.max(0, baseScene.roi.y - 120),
+        width: baseScene.roi.width + 32,
+        height: baseScene.roi.height + 360,
+      },
+      scale: 4,
+    });
+    // Right-column top focus to recover indices 13/14 when global OCR clips upper-right labels.
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x + Math.round(baseScene.roi.width * 0.42)),
+        y: Math.max(0, baseScene.roi.y - 280),
+        width: Math.round(baseScene.roi.width * 0.64),
+        height: baseScene.roi.height + 520,
+      },
+      scale: 4,
+    });
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x + Math.round(baseScene.roi.width * 0.48)),
+        y: Math.max(0, baseScene.roi.y - 190),
+        width: Math.round(baseScene.roi.width * 0.54),
+        height: baseScene.roi.height + 360,
+      },
+      scale: 4,
+    });
+    add(baseScene);
+    add({
+      ...baseScene,
+      roi: {
+        x: baseScene.roi.x,
+        y: baseScene.roi.y + 260,
+        width: baseScene.roi.width,
+        height: baseScene.roi.height,
+      },
+    });
+    add({
+      ...baseScene,
+      roi: {
+        x: Math.max(0, baseScene.roi.x - 8),
+        y: baseScene.roi.y + 330,
+        width: baseScene.roi.width + 16,
+        height: baseScene.roi.height,
+      },
+      scale: 3,
+    });
+    return candidates;
+  }
+
+  // 18-word: mild top/bottom-biased crops.
+  add(baseScene);
+  add({
+    ...baseScene,
+    roi: {
+      x: Math.max(0, baseScene.roi.x - 24),
+      y: Math.max(0, baseScene.roi.y - 96),
+      width: baseScene.roi.width + 48,
+      height: baseScene.roi.height + 280,
+    },
+    scale: 4,
+  });
+  add({
+    ...baseScene,
+    roi: {
+      x: baseScene.roi.x,
+      y: baseScene.roi.y + 190,
+      width: baseScene.roi.width,
+      height: baseScene.roi.height,
+    },
+  });
+
+  return candidates;
 }
 
 /**
@@ -69,7 +315,8 @@ function correctToBip39(ocrWord: string): { word: string; corrected: boolean } {
     }
     if (dist === 0) break; // exact match shortcut
   }
-  return { word: bestWord, corrected: bestDist > 0 && bestDist <= 3 };
+  // Keep correction conservative for create-wallet flow to avoid overfitting wrong words.
+  return { word: bestWord, corrected: bestDist > 0 && bestDist <= 2 };
 }
 
 /**
@@ -172,229 +419,204 @@ function tryBip39AutoCorrect(mnemonicWords: MnemonicWord[]): boolean {
 }
 
 /**
- * Calculates Otsu's threshold for optimal binarization.
- * Finds the threshold that minimizes intra-class variance.
+ * Builds ROI crop + scaled OCR input image from a rotated source frame.
  */
-function calculateOtsuThreshold(histogram: number[], total: number): number {
-  let sum = 0;
-  for (let i = 0; i < 256; i++) {
-    sum += i * histogram[i];
-  }
-
-  let sumB = 0;
-  let wB = 0;
-  let wF = 0;
-  let maxVariance = 0;
-  let threshold = 0;
-
-  for (let i = 0; i < 256; i++) {
-    wB += histogram[i];
-    if (wB === 0) continue;
-
-    wF = total - wB;
-    if (wF === 0) break;
-
-    sumB += i * histogram[i];
-
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-
-    const variance = wB * wF * (mB - mF) * (mB - mF);
-
-    if (variance > maxVariance) {
-      maxVariance = variance;
-      threshold = i;
-    }
-  }
-
-  return threshold;
-}
-
-/**
- * Applies adaptive local thresholding for better text extraction.
- * Uses a sliding window to calculate local thresholds.
- */
-function applyAdaptiveThreshold(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number,
-  blockSize: number = 15,
-  c: number = 10
-): void {
-  // Create integral image for fast local mean calculation
-  const integral = new Float64Array((width + 1) * (height + 1));
-  
-  for (let y = 0; y < height; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      rowSum += data[idx];
-      integral[(y + 1) * (width + 1) + (x + 1)] = 
-        rowSum + integral[y * (width + 1) + (x + 1)];
-    }
-  }
-
-  // Apply adaptive threshold
-  const halfBlock = Math.floor(blockSize / 2);
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const x1 = Math.max(0, x - halfBlock);
-      const y1 = Math.max(0, y - halfBlock);
-      const x2 = Math.min(width - 1, x + halfBlock);
-      const y2 = Math.min(height - 1, y + halfBlock);
-      
-      const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-      
-      // Calculate local mean using integral image
-      const sum = integral[(y2 + 1) * (width + 1) + (x2 + 1)]
-                - integral[(y2 + 1) * (width + 1) + x1]
-                - integral[y1 * (width + 1) + (x2 + 1)]
-                + integral[y1 * (width + 1) + x1];
-      
-      const mean = sum / count;
-      const threshold = mean - c;
-      
-      const idx = (y * width + x) * 4;
-      const value = data[idx] > threshold ? 255 : 0;
-      
-      data[idx] = value;
-      data[idx + 1] = value;
-      data[idx + 2] = value;
-    }
-  }
-}
-
-/**
- * Applies morphological operations to clean up the image.
- * Removes small noise and fills small gaps in text.
- */
-function applyMorphology(
-  data: Uint8ClampedArray,
-  width: number,
-  height: number
-): void {
-  const temp = new Uint8ClampedArray(data.length);
-  
-  // Erosion followed by dilation (opening) - removes small white noise
-  // Using a 3x3 kernel
-  
-  // Erosion
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      let min = 255;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const idx = ((y + dy) * width + (x + dx)) * 4;
-          min = Math.min(min, data[idx]);
-        }
-      }
-      const idx = (y * width + x) * 4;
-      temp[idx] = temp[idx + 1] = temp[idx + 2] = min;
-      temp[idx + 3] = 255;
-    }
-  }
-  
-  // Dilation
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      let max = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const idx = ((y + dy) * width + (x + dx)) * 4;
-          max = Math.max(max, temp[idx]);
-        }
-      }
-      const idx = (y * width + x) * 4;
-      data[idx] = data[idx + 1] = data[idx + 2] = max;
-    }
-  }
-}
-
-/**
- * Preprocesses an image for better OCR accuracy.
- * Uses advanced techniques: Otsu thresholding, adaptive binarization, and morphology.
- */
-function preprocessImageForOcr(
+function buildPreOcrCanvasFromFrame(
   sourceCanvas: HTMLCanvasElement,
-  targetCanvas: HTMLCanvasElement
-): void {
-  const sourceCtx = sourceCanvas.getContext('2d');
-  const targetCtx = targetCanvas.getContext('2d');
-  if (!sourceCtx || !targetCtx) return;
-
-  const width = sourceCanvas.width;
-  const height = sourceCanvas.height;
-  
-  targetCanvas.width = width;
-  targetCanvas.height = height;
-
-  // Get image data
-  const imageData = sourceCtx.getImageData(0, 0, width, height);
-  const data = imageData.data;
-
-  // Step 1: Convert to grayscale and build histogram
-  const histogram = new Array(256).fill(0);
-  let totalBrightness = 0;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    data[i] = data[i + 1] = data[i + 2] = gray;
-    histogram[gray]++;
-    totalBrightness += gray;
-  }
-  
-  const pixelCount = data.length / 4;
-  const avgBrightness = totalBrightness / pixelCount;
-  const isDarkMode = avgBrightness < 128;
-  
-  console.log('Preprocessing - brightness:', avgBrightness.toFixed(1), 'darkMode:', isDarkMode);
-
-  // Step 2: Invert if dark mode
-  if (isDarkMode) {
-    for (let i = 0; i < data.length; i += 4) {
-      data[i] = 255 - data[i];
-      data[i + 1] = 255 - data[i + 1];
-      data[i + 2] = 255 - data[i + 2];
-    }
-    // Rebuild histogram after inversion
-    histogram.fill(0);
-    for (let i = 0; i < data.length; i += 4) {
-      histogram[data[i]]++;
-    }
-  }
-
-  // Step 3: Calculate Otsu threshold
-  const otsuThreshold = calculateOtsuThreshold(histogram, pixelCount);
-  console.log('Otsu threshold:', otsuThreshold);
-
-  // Step 4: Apply contrast enhancement
-  const contrast = 2.0;
-  for (let i = 0; i < data.length; i += 4) {
-    let gray = data[i];
-    // Normalize around Otsu threshold for better separation
-    const factor = (259 * (contrast * 100 + 255)) / (255 * (259 - contrast * 100));
-    gray = Math.max(0, Math.min(255, factor * (gray - otsuThreshold) + 128));
-    data[i] = data[i + 1] = data[i + 2] = gray;
-  }
-
-  // Step 5: Apply adaptive thresholding for final binarization
-  applyAdaptiveThreshold(data, width, height, 25, 15);
-  
-  // Step 6: Apply morphological cleaning
-  applyMorphology(data, width, height);
-
-  targetCtx.putImageData(imageData, 0, 0);
+  ocrCanvas: HTMLCanvasElement,
+  sceneConfig: OcrSceneConfig
+): { imageDataUrl: string; preOcrImageDataUrl: string } | null {
+  const cropCanvas = cropToROI(sourceCanvas, sceneConfig.roi);
+  const scaledCanvas = scaleCanvas(cropCanvas, sceneConfig.scale, sceneConfig.useNearestNeighbor);
+  const ocrCtx = ocrCanvas.getContext('2d');
+  if (!ocrCtx) return null;
+  ocrCanvas.width = scaledCanvas.width;
+  ocrCanvas.height = scaledCanvas.height;
+  ocrCtx.clearRect(0, 0, ocrCanvas.width, ocrCanvas.height);
+  ocrCtx.drawImage(scaledCanvas, 0, 0);
+  const imageDataUrl = cropCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+  const preOcrImageDataUrl = ocrCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+  return { imageDataUrl, preOcrImageDataUrl };
 }
 
-/** Fixed OCR region of interest (ROI) for mnemonic recognition at X85Y0 position */
-const OCR_ROI = { x: 230, y: 440, width: 680, height: 1110 } as const;
+/**
+ * Builds OCR input images directly from live video.
+ */
+function buildPreOcrCanvasFromVideo(
+  video: HTMLVideoElement,
+  canvas: HTMLCanvasElement,
+  ocrCanvas: HTMLCanvasElement,
+  sceneConfig: OcrSceneConfig
+): { imageDataUrl: string; preOcrImageDataUrl: string } | null {
+  rotateVideoFrameToCanvas(video, canvas);
+  return buildPreOcrCanvasFromFrame(canvas, ocrCanvas, sceneConfig);
+}
 
-/** Verification page ROI: focused region for "#N" number detection (tight crop around number area) */
-const VERIFY_NUMBER_ROI = { x: 230, y: 480, width: 400, height: 130 } as const;
+/**
+ * Converts OCR input canvas to PaddleOCR input data URL.
+ * Downscales oversized images to reduce inference cost.
+ */
+function buildPaddleInputDataUrl(
+  sourceCanvas: HTMLCanvasElement,
+  useNearestNeighbor: boolean
+): string {
+  const currentMaxSide = Math.max(sourceCanvas.width, sourceCanvas.height);
+  if (currentMaxSide <= PADDLE_MAX_IMAGE_SIDE) {
+    return sourceCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+  }
 
-/** Verification page ROI: bottom region for 3 option words */
-const VERIFY_OPTIONS_ROI = { x: 230, y: 1100, width: 680, height: 450 } as const;
+  const ratio = PADDLE_MAX_IMAGE_SIDE / currentMaxSide;
+  const targetWidth = Math.max(1, Math.round(sourceCanvas.width * ratio));
+  const targetHeight = Math.max(1, Math.round(sourceCanvas.height * ratio));
+  const resized = document.createElement('canvas');
+  resized.width = targetWidth;
+  resized.height = targetHeight;
+  const ctx = resized.getContext('2d');
+  if (!ctx) {
+    return sourceCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+  }
+
+  ctx.imageSmoothingEnabled = !useNearestNeighbor;
+  ctx.imageSmoothingQuality = useNearestNeighbor ? 'low' : 'high';
+  ctx.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight);
+  return resized.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+}
+
+/**
+ * Captures one rotated full frame so multiple ROI OCR passes share the exact same frame.
+ */
+function captureRotatedFrameCanvas(video: HTMLVideoElement): HTMLCanvasElement {
+  const frameCanvas = document.createElement('canvas');
+  rotateVideoFrameToCanvas(video, frameCanvas);
+  return frameCanvas;
+}
+
+/**
+ * Extracts verification word index from OCR text.
+ * Priority: digits after "#" -> "单词#N"/"word #N" patterns -> any valid digit in range.
+ */
+function extractWordIndexFromText(text: string, maxIndex: number = 12): number {
+  const safeMaxIndex = Math.max(1, Math.min(24, Math.floor(maxIndex)));
+  const normalized = text.trim();
+  if (!normalized) return -1;
+  const normalizedForDigits = normalized
+    // Common OCR confusions on index text.
+    .replace(/[Iil|!丨｜]/g, '1')
+    .replace(/[Oo]/g, '0');
+
+  const hashMatches = [...normalizedForDigits.matchAll(/[#＃]\s*(\d{1,2})/g)];
+  for (let i = hashMatches.length - 1; i >= 0; i--) {
+    const value = parseInt(hashMatches[i][1], 10);
+    if (value >= 1 && value <= safeMaxIndex) return value;
+  }
+
+  const hashAmbiguousMatch = normalized.match(/[#＃]\s*([A-Za-z!丨｜|])/);
+  if (hashAmbiguousMatch) {
+    const symbol = hashAmbiguousMatch[1];
+    const mapped = symbol
+      .replace(/[IiLl!丨｜|]/g, '1')
+      .replace(/[Oo]/g, '0');
+    if (/^\d{1,2}$/.test(mapped)) {
+      const value = parseInt(mapped, 10);
+      if (value >= 1 && value <= safeMaxIndex) return value;
+    }
+  }
+
+  const explicitPatterns = [
+    /单词\s*[#＃]?\s*(\d{1,2})/i,
+    /word\s*[#＃]?\s*(\d{1,2})/i,
+    /第\s*(\d{1,2})\s*(个|位)?\s*(单词|词|word)?/i,
+    /(\d{1,2})\s*(st|nd|rd|th)\s*(word)?/i,
+  ];
+  for (const pattern of explicitPatterns) {
+    const match = normalizedForDigits.match(pattern);
+    if (!match) continue;
+    const value = parseInt(match[1], 10);
+    if (value >= 1 && value <= safeMaxIndex) return value;
+  }
+
+  // Conservative fallback: only accept plain number text when OCR output is short.
+  // This avoids misreading unrelated text (e.g. status-bar battery digits) as word index.
+  const digitMatches = normalizedForDigits.match(/\d{1,2}/g) || [];
+  if (digitMatches.length === 1) {
+    const value = parseInt(digitMatches[0], 10);
+    const compact = normalizedForDigits.replace(/\s+/g, '');
+    if (value >= 1 && value <= safeMaxIndex && compact.length <= 4) {
+      return value;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * Extracts up to 3 option words from verification options OCR text.
+ * Prefers one token per line to preserve top-to-bottom click order.
+ */
+function extractVerifyOptionWords(text: string, maxOptions: number = 3): string[] {
+  const normalizedLines = text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const optionsFromLines: string[] = [];
+  for (const line of normalizedLines) {
+    const tokens = (line.match(/[a-zA-Z]{2,16}/g) ?? [])
+      .map((token) => token.toLowerCase().replace(/[^a-z]/g, ''))
+      .filter((token) => token.length >= 2 && token.length <= 12);
+    if (tokens.length === 0) continue;
+    const bestToken = tokens.reduce((longest, current) =>
+      current.length > longest.length ? current : longest
+    );
+    optionsFromLines.push(bestToken);
+    if (optionsFromLines.length >= maxOptions) {
+      return optionsFromLines;
+    }
+  }
+
+  // Fallback to ordered tokens when line separation is poor.
+  const orderedTokens = (text.match(/[a-zA-Z]{2,16}/g) ?? [])
+    .map((token) => token.toLowerCase().replace(/[^a-z]/g, ''))
+    .filter((token) => token.length >= 2 && token.length <= 12);
+
+  const unique: string[] = [];
+  for (const token of orderedTokens) {
+    if (!unique.includes(token)) {
+      unique.push(token);
+      if (unique.length >= maxOptions) break;
+    }
+  }
+  return unique;
+}
+
+/**
+ * Strict option mapping: exact match first, otherwise unique nearest mnemonic within small edit distance.
+ */
+function mapOptionToMnemonicStrict(ocrWord: string, mnemonicWords: string[]): string | null {
+  if (mnemonicWords.includes(ocrWord)) return ocrWord;
+
+  let bestWord: string | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestCount = 0;
+
+  for (const mnemonicWord of mnemonicWords) {
+    const distance = levenshteinDistance(ocrWord, mnemonicWord);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestWord = mnemonicWord;
+      bestCount = 1;
+    } else if (distance === bestDistance) {
+      bestCount += 1;
+    }
+  }
+
+  const maxDistance = ocrWord.length >= 6 ? 2 : 1;
+  if (bestWord && bestDistance <= maxDistance && bestCount === 1) {
+    return bestWord;
+  }
+
+  return null;
+}
 
 function CameraPanel() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -409,9 +631,51 @@ function CameraPanel() {
   const [isOcrProcessing, setIsOcrProcessing] = useState(false);
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
   const [storedMnemonic, setStoredMnemonic] = useState<StoredMnemonic | null>(null);
+  const [fullFrameImageUrl, setFullFrameImageUrl] = useState<string | null>(null);
   const [capturedImageUrl, setCapturedImageUrl] = useState<string | null>(null);
+  const [preOcrImageUrl, setPreOcrImageUrl] = useState<string | null>(null);
   const [numberImageUrl, setNumberImageUrl] = useState<string | null>(null);
+  const [numberPreOcrImageUrl, setNumberPreOcrImageUrl] = useState<string | null>(null);
   const ocrWorkerRef = useRef<Worker | null>(null);
+
+  const saveStoredMnemonic = useCallback((words: string[]) => {
+    const payload: StoredMnemonic = { words, timestamp: new Date() };
+    setStoredMnemonic(payload);
+    try {
+      localStorage.setItem(
+        STORED_MNEMONIC_KEY,
+        JSON.stringify({ words: payload.words, timestamp: payload.timestamp.toISOString() })
+      );
+    } catch (err) {
+      console.warn('Failed to persist mnemonic locally:', err);
+    }
+  }, []);
+
+  const clearStoredMnemonic = useCallback(() => {
+    setStoredMnemonic(null);
+    try {
+      localStorage.removeItem(STORED_MNEMONIC_KEY);
+    } catch (err) {
+      console.warn('Failed to clear stored mnemonic locally:', err);
+    }
+  }, []);
+
+  // Restore previously recognized mnemonic words for verification-page debug workflow.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORED_MNEMONIC_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { words?: unknown; timestamp?: unknown };
+      if (!Array.isArray(parsed.words) || parsed.words.length === 0) return;
+      const words = parsed.words.filter((w): w is string => typeof w === 'string');
+      if (words.length === 0) return;
+      const timestamp =
+        typeof parsed.timestamp === 'string' ? new Date(parsed.timestamp) : new Date();
+      setStoredMnemonic({ words, timestamp });
+    } catch (err) {
+      console.warn('Failed to restore mnemonic from local storage:', err);
+    }
+  }, []);
 
   /**
    * Captures the current video frame as a base64-encoded JPEG image.
@@ -455,7 +719,7 @@ function CameraPanel() {
     ctx.restore();
 
     // Convert to base64 JPEG (without the data:image/jpeg;base64, prefix)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
     const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
 
     return base64;
@@ -482,23 +746,57 @@ function CameraPanel() {
         },
       });
 
-      await ocrWorkerRef.current.setParameters({
-        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
-        tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.# ',
-      });
+      await ocrWorkerRef.current.setParameters(BASE_OCR_PARAMS);
 
       console.log('Tesseract.js worker initialized');
     }
     return ocrWorkerRef.current;
   }, []);
 
+  // Preload OCR worker only when Tesseract backend is enabled.
+  useEffect(() => {
+    if (OCR_BACKEND !== 'tesseract') {
+      return;
+    }
+
+    let disposed = false;
+
+    const preloadWorker = async () => {
+      try {
+        const worker = await ensureOcrWorker();
+        if (disposed) {
+          await worker.terminate();
+          if (ocrWorkerRef.current === worker) {
+            ocrWorkerRef.current = null;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to preload OCR worker:', err);
+      }
+    };
+
+    preloadWorker();
+
+    return () => {
+      disposed = true;
+    };
+  }, [ensureOcrWorker]);
+
   /**
-   * Captures a frame, crops to the given region, preprocesses, and runs OCR.
+   * Captures a frame, crops to the scene region, scales it, and runs OCR.
    * Returns raw text, confidence, and the cropped image data URL.
    */
   const runOcrOnRegion = useCallback(async (
-    roi: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
-  ): Promise<{ rawText: string; confidence: number; imageDataUrl: string; words: { text: string; confidence: number }[] } | null> => {
+    sceneConfig: OcrSceneConfig,
+    options?: {
+      onImageForOcr?: (dataUrl: string) => void;
+      frameCanvas?: HTMLCanvasElement;
+      ocrParams?: OcrParams;
+      layoutHint?: 'mnemonic' | 'verify-options' | 'verify-number' | 'generic';
+      forceTesseract?: boolean;
+      expectedWordCount?: number;
+    }
+  ): Promise<{ rawText: string; confidence: number; imageDataUrl: string; preOcrImageDataUrl: string; words: OcrWord[] } | null> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ocrCanvas = ocrCanvasRef.current;
@@ -507,65 +805,75 @@ function CameraPanel() {
       return null;
     }
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    const built = options?.frameCanvas
+      ? buildPreOcrCanvasFromFrame(options.frameCanvas, ocrCanvas, sceneConfig)
+      : buildPreOcrCanvasFromVideo(video, canvas, ocrCanvas, sceneConfig);
+    if (!built) return null;
+    const { imageDataUrl, preOcrImageDataUrl } = built;
+    const ocrInputDataUrl = OCR_BACKEND === 'paddleocr_en'
+      ? buildPaddleInputDataUrl(ocrCanvas, sceneConfig.useNearestNeighbor)
+      : preOcrImageDataUrl;
 
-    // Rotate 90 degrees clockwise: swap width and height for portrait output
-    canvas.width = video.videoHeight;
-    canvas.height = video.videoWidth;
+    options?.onImageForOcr?.(ocrInputDataUrl);
 
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(Math.PI / 2);
-    ctx.drawImage(
-      video,
-      -video.videoWidth / 2,
-      -video.videoHeight / 2,
-      video.videoWidth,
-      video.videoHeight
-    );
-    ctx.restore();
+    const inferredLayoutHint = (() => {
+      if (options?.layoutHint) return options.layoutHint;
+      if (
+        sceneConfig.roi.width === MNEMONIC_SCENE.roi.width
+        && sceneConfig.roi.height === MNEMONIC_SCENE.roi.height
+      ) {
+        return 'mnemonic' as const;
+      }
+      if (
+        sceneConfig.roi.width === VERIFY_OPTIONS_SCENE.roi.width
+        && sceneConfig.roi.height === VERIFY_OPTIONS_SCENE.roi.height
+      ) {
+        return 'verify-options' as const;
+      }
+      return 'generic' as const;
+    })();
 
-    // Crop to specified ROI region
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = roi.width;
-    cropCanvas.height = roi.height;
-    const cropCtx = cropCanvas.getContext('2d');
-    if (!cropCtx) return null;
-    cropCtx.drawImage(
-      canvas,
-      roi.x, roi.y, roi.width, roi.height,
-      0, 0, roi.width, roi.height
-    );
-
-    // Capture the cropped image as a data URL for display (original resolution)
-    const imageDataUrl = cropCanvas.toDataURL('image/jpeg', 0.85);
-
-    // Upscale 3x for better OCR accuracy on small text
-    const scale = 3;
-    const scaledCanvas = document.createElement('canvas');
-    scaledCanvas.width = roi.width * scale;
-    scaledCanvas.height = roi.height * scale;
-    const scaledCtx = scaledCanvas.getContext('2d');
-    if (!scaledCtx) return null;
-    scaledCtx.imageSmoothingEnabled = true;
-    scaledCtx.imageSmoothingQuality = 'high';
-    scaledCtx.drawImage(cropCanvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
-
-    // Preprocess upscaled image for better OCR
-    preprocessImageForOcr(scaledCanvas, ocrCanvas);
+    if (!options?.forceTesseract && OCR_BACKEND === 'paddleocr_en' && window.electronAPI?.paddleOcrEnRecognize) {
+      const paddle = await window.electronAPI.paddleOcrEnRecognize(
+        ocrInputDataUrl,
+        inferredLayoutHint,
+        options?.expectedWordCount
+      );
+      const fallbackConfidence = Number.isFinite(paddle.confidence) ? paddle.confidence : 0;
+      return {
+        rawText: paddle.text || '',
+        confidence: fallbackConfidence,
+        imageDataUrl,
+        preOcrImageDataUrl: ocrInputDataUrl,
+        words: buildFallbackWordsFromText(paddle.text || '', fallbackConfidence),
+      };
+    }
 
     const worker = await ensureOcrWorker();
+    if (options?.ocrParams) {
+      await worker.setParameters(options.ocrParams);
+    }
     const result = await worker.recognize(ocrCanvas);
+    if (options?.ocrParams) {
+      await worker.setParameters(BASE_OCR_PARAMS);
+    }
 
     // Extract word-level data from Tesseract's nested structure
-    const ocrWords: { text: string; confidence: number }[] = [];
+    const ocrWords: OcrWord[] = [];
     if (result.data.blocks) {
       for (const block of result.data.blocks) {
         for (const para of block.paragraphs) {
           for (const line of para.lines) {
             for (const word of line.words) {
-              ocrWords.push({ text: word.text, confidence: word.confidence });
+              const bbox = word.bbox ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
+              ocrWords.push({
+                text: word.text,
+                confidence: word.confidence,
+                x: bbox.x0,
+                y: bbox.y0,
+                w: Math.max(0, bbox.x1 - bbox.x0),
+                h: Math.max(0, bbox.y1 - bbox.y0),
+              });
             }
           }
         }
@@ -576,149 +884,630 @@ function CameraPanel() {
       rawText: result.data.text,
       confidence: result.data.confidence,
       imageDataUrl,
+      preOcrImageDataUrl,
       words: ocrWords,
     };
   }, [ensureOcrWorker]);
 
   /**
    * Captures a frame, crops to the number region, and runs OCR optimized for detecting
-   * a single number 1-12 (used for verification page "#N" detection).
-   * Uses 4x upscaling and digits-only whitelist for maximum accuracy.
+   * a single number 1-N (used for verification page "#N" detection, N=12/18/24).
+   * Uses scene-config upscaling and digits-only OCR parameters for maximum accuracy.
    */
-  const runNumberOcr = useCallback(async (): Promise<{ number: number; rawText: string; confidence: number; imageDataUrl: string } | null> => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ocrCanvas = ocrCanvasRef.current;
+  const runNumberOcr = useCallback(async (options?: {
+    onImageForOcr?: (dataUrl: string) => void;
+    frameCanvas?: HTMLCanvasElement;
+    maxIndex?: number;
+  }): Promise<{ number: number; rawText: string; confidence: number; imageDataUrl: string; preOcrImageDataUrl: string } | null> => {
+    const maxIndex = Math.max(1, Math.min(24, Math.floor(options?.maxIndex ?? 12)));
+    const fallbackScenes: OcrSceneConfig[] = [
+      // Tight first-line crop (often improves "#N" visibility).
+      {
+        ...VERIFY_NUMBER_SCENE,
+        roi: {
+          x: VERIFY_NUMBER_SCENE.roi.x,
+          y: Math.max(0, VERIFY_NUMBER_SCENE.roi.y - 20),
+          width: VERIFY_NUMBER_SCENE.roi.width,
+          height: Math.max(60, Math.round(VERIFY_NUMBER_SCENE.roi.height * 0.72)),
+        },
+        scale: 7,
+      },
+      // Extra-tight hash-right area to catch a faint single digit (e.g. "#1").
+      {
+        ...VERIFY_NUMBER_SCENE,
+        roi: {
+          x: VERIFY_NUMBER_SCENE.roi.x + Math.round(VERIFY_NUMBER_SCENE.roi.width * 0.32),
+          y: Math.max(0, VERIFY_NUMBER_SCENE.roi.y - 20),
+          width: Math.max(120, Math.round(VERIFY_NUMBER_SCENE.roi.width * 0.45)),
+          height: Math.max(56, Math.round(VERIFY_NUMBER_SCENE.roi.height * 0.70)),
+        },
+        scale: 8,
+      },
+      VERIFY_NUMBER_SCENE,
+      {
+        ...VERIFY_NUMBER_SCENE,
+        roi: {
+          x: Math.max(0, VERIFY_NUMBER_SCENE.roi.x - 40),
+          y: Math.max(0, VERIFY_NUMBER_SCENE.roi.y - 70),
+          width: VERIFY_NUMBER_SCENE.roi.width + 120,
+          height: VERIFY_NUMBER_SCENE.roi.height + 140,
+        },
+        scale: 4,
+      },
+      {
+        ...VERIFY_NUMBER_SCENE,
+        roi: {
+          x: Math.max(0, VERIFY_NUMBER_SCENE.roi.x - 80),
+          y: Math.max(0, VERIFY_NUMBER_SCENE.roi.y - 120),
+          width: VERIFY_NUMBER_SCENE.roi.width + 220,
+          height: VERIFY_NUMBER_SCENE.roi.height + 260,
+        },
+        scale: 3,
+      },
+    ];
+    let bestAttempt: {
+      rawText: string;
+      confidence: number;
+      imageDataUrl: string;
+      preOcrImageDataUrl: string;
+    } | null = null;
 
-    if (!video || !canvas || !ocrCanvas || video.readyState < 2) {
-      return null;
-    }
+    for (const scene of fallbackScenes) {
+      const result = await runOcrOnRegion(scene, {
+        onImageForOcr: options?.onImageForOcr,
+        frameCanvas: options?.frameCanvas,
+        ocrParams: OCR_BACKEND === 'tesseract' ? NUMBER_OCR_PARAMS : undefined,
+        layoutHint: 'verify-number',
+        expectedWordCount: maxIndex,
+      });
+      if (!result) continue;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+      const rawText = result.rawText;
+      const confidence = result.confidence;
+      const detectedNumber = extractWordIndexFromText(rawText, maxIndex);
 
-    // Rotate 90 degrees clockwise
-    canvas.width = video.videoHeight;
-    canvas.height = video.videoWidth;
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(Math.PI / 2);
-    ctx.drawImage(video, -video.videoWidth / 2, -video.videoHeight / 2, video.videoWidth, video.videoHeight);
-    ctx.restore();
+      if (!bestAttempt || confidence > bestAttempt.confidence) {
+        bestAttempt = {
+          rawText,
+          confidence,
+          imageDataUrl: result.imageDataUrl,
+          preOcrImageDataUrl: result.preOcrImageDataUrl,
+        };
+      }
 
-    // Crop to tight number region
-    const roi = VERIFY_NUMBER_ROI;
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = roi.width;
-    cropCanvas.height = roi.height;
-    const cropCtx = cropCanvas.getContext('2d');
-    if (!cropCtx) return null;
-    cropCtx.drawImage(canvas, roi.x, roi.y, roi.width, roi.height, 0, 0, roi.width, roi.height);
+      console.log(
+        `[CameraPanel] Number OCR raw: "${rawText.trim()}", confidence: ${confidence.toFixed(0)}%, roi=(${scene.roi.x},${scene.roi.y},${scene.roi.width},${scene.roi.height})`
+      );
 
-    // Capture the cropped image for display
-    const imageDataUrl = cropCanvas.toDataURL('image/jpeg', 0.85);
-
-    // Upscale 4x for small number detection
-    const scale = 4;
-    const scaledCanvas = document.createElement('canvas');
-    scaledCanvas.width = roi.width * scale;
-    scaledCanvas.height = roi.height * scale;
-    const scaledCtx = scaledCanvas.getContext('2d');
-    if (!scaledCtx) return null;
-    scaledCtx.imageSmoothingEnabled = true;
-    scaledCtx.imageSmoothingQuality = 'high';
-    scaledCtx.drawImage(cropCanvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
-
-    // Preprocess
-    preprocessImageForOcr(scaledCanvas, ocrCanvas);
-
-    // Use digits-only whitelist for number detection
-    const worker = await ensureOcrWorker();
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789# ',
-      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
-    });
-
-    const result = await worker.recognize(ocrCanvas);
-
-    // Restore full whitelist for subsequent OCR calls
-    await worker.setParameters({
-      tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.# ',
-      tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
-    });
-
-    const rawText = result.data.text;
-    const confidence = result.data.confidence;
-
-    console.log(`[CameraPanel] Number OCR raw: "${rawText.trim()}", confidence: ${confidence.toFixed(0)}%`);
-
-    // Extract all digit sequences and find the first valid 1-12
-    const digitMatches = rawText.match(/\d+/g) || [];
-    let detectedNumber = -1;
-    for (const digits of digitMatches) {
-      const num = parseInt(digits, 10);
-      if (num >= 1 && num <= 12) {
-        detectedNumber = num;
-        break;
+      if (detectedNumber !== -1) {
+        return {
+          number: detectedNumber,
+          rawText,
+          confidence,
+          imageDataUrl: result.imageDataUrl,
+          preOcrImageDataUrl: result.preOcrImageDataUrl,
+        };
       }
     }
 
-    if (detectedNumber === -1) return null;
+    if (bestAttempt) {
+      // Paddle pass failed to get a valid index; fallback to Tesseract digits-only across ROI variants.
+      for (const scene of fallbackScenes) {
+        const tesseractResult = await runOcrOnRegion(scene, {
+          onImageForOcr: options?.onImageForOcr,
+          frameCanvas: options?.frameCanvas,
+          forceTesseract: true,
+          ocrParams: NUMBER_OCR_PARAMS,
+          layoutHint: 'verify-number',
+          expectedWordCount: maxIndex,
+        });
+        if (!tesseractResult) continue;
 
-    return { number: detectedNumber, rawText, confidence, imageDataUrl };
-  }, [ensureOcrWorker]);
+        const tesseractIndex = extractWordIndexFromText(tesseractResult.rawText, maxIndex);
+        console.log(
+          `[CameraPanel] Number OCR tesseract fallback raw: "${tesseractResult.rawText.trim()}", confidence: ${tesseractResult.confidence.toFixed(0)}%, roi=(${scene.roi.x},${scene.roi.y},${scene.roi.width},${scene.roi.height})`
+        );
+        if (tesseractIndex !== -1) {
+          return {
+            number: tesseractIndex,
+            rawText: tesseractResult.rawText,
+            confidence: tesseractResult.confidence,
+            imageDataUrl: tesseractResult.imageDataUrl,
+            preOcrImageDataUrl: tesseractResult.preOcrImageDataUrl,
+          };
+        }
+      }
+
+      return {
+        number: -1,
+        rawText: bestAttempt.rawText,
+        confidence: bestAttempt.confidence,
+        imageDataUrl: bestAttempt.imageDataUrl,
+        preOcrImageDataUrl: bestAttempt.preOcrImageDataUrl,
+      };
+    }
+
+    return null;
+  }, [runOcrOnRegion]);
+
+  const runVerifyOptionsOcr = useCallback(async (options?: {
+    onImageForOcr?: (dataUrl: string) => void;
+    frameCanvas?: HTMLCanvasElement;
+    targetWord?: string;
+  }): Promise<{
+    rawText: string;
+    rawOptions: string[];
+    confidence: number;
+    imageDataUrl: string;
+    preOcrImageDataUrl: string;
+  } | null> => {
+    const fallbackScenes: OcrSceneConfig[] = [
+      VERIFY_OPTIONS_SCENE,
+      {
+        ...VERIFY_OPTIONS_SCENE,
+        roi: {
+          x: Math.max(0, VERIFY_OPTIONS_SCENE.roi.x - 40),
+          y: Math.max(0, VERIFY_OPTIONS_SCENE.roi.y - 40),
+          width: VERIFY_OPTIONS_SCENE.roi.width + 80,
+          height: VERIFY_OPTIONS_SCENE.roi.height + 120,
+        },
+        scale: 4,
+      },
+      {
+        ...VERIFY_OPTIONS_SCENE,
+        roi: {
+          x: Math.max(0, VERIFY_OPTIONS_SCENE.roi.x - 80),
+          y: Math.max(0, VERIFY_OPTIONS_SCENE.roi.y - 90),
+          width: VERIFY_OPTIONS_SCENE.roi.width + 160,
+          height: VERIFY_OPTIONS_SCENE.roi.height + 220,
+        },
+        scale: 3,
+      },
+    ];
+    let bestAttempt: {
+      rawText: string;
+      rawOptions: string[];
+      confidence: number;
+      imageDataUrl: string;
+      preOcrImageDataUrl: string;
+      score: number;
+      scene: OcrSceneConfig;
+    } | null = null;
+
+    for (const scene of fallbackScenes) {
+      const result = await runOcrOnRegion(scene, {
+        frameCanvas: options?.frameCanvas,
+        layoutHint: 'verify-options',
+      });
+      if (!result) continue;
+
+      const rawOptions = extractVerifyOptionWords(result.rawText, 3);
+      let score = rawOptions.length * 120 + result.confidence;
+      const targetWord = options?.targetWord?.toLowerCase().trim();
+      if (targetWord) {
+        if (rawOptions.includes(targetWord)) {
+          score += 300;
+        } else if (rawOptions.length > 0) {
+          const minDist = Math.min(...rawOptions.map((word) => levenshteinDistance(word, targetWord)));
+          if (minDist <= 1) {
+            score += 180;
+          } else if (minDist <= 2) {
+            score += 90;
+          }
+        }
+      }
+
+      console.log(
+        `[CameraPanel] Verify options OCR raw="${result.rawText.replace(/\s+/g, ' ').trim()}", options=[${rawOptions.join(', ')}], conf=${result.confidence.toFixed(0)}%, roi=(${scene.roi.x},${scene.roi.y},${scene.roi.width},${scene.roi.height}), score=${score.toFixed(1)}`
+      );
+
+      if (!bestAttempt || score > bestAttempt.score) {
+        bestAttempt = {
+          rawText: result.rawText,
+          rawOptions,
+          confidence: result.confidence,
+          imageDataUrl: result.imageDataUrl,
+          preOcrImageDataUrl: result.preOcrImageDataUrl,
+          score,
+          scene,
+        };
+      }
+    }
+
+    if (!bestAttempt) return null;
+    options?.onImageForOcr?.(bestAttempt.preOcrImageDataUrl);
+    return {
+      rawText: bestAttempt.rawText,
+      rawOptions: bestAttempt.rawOptions,
+      confidence: bestAttempt.confidence,
+      imageDataUrl: bestAttempt.imageDataUrl,
+      preOcrImageDataUrl: bestAttempt.preOcrImageDataUrl,
+    };
+  }, [runOcrOnRegion]);
 
   /**
    * Captures current frame and runs OCR recognition on the standard mnemonic ROI.
    * Applies BIP39 wordlist correction to fix misrecognized words.
    * Returns the recognized mnemonic words or null if failed.
    */
-  const runSingleOcr = useCallback(async (): Promise<{
+  const runSingleOcr = useCallback(async (options?: {
+    onImageForOcr?: (dataUrl: string) => void;
+    sceneConfig?: OcrSceneConfig;
+    frameCanvas?: HTMLCanvasElement;
+    expectedWordCount?: number;
+  }): Promise<{
     mnemonicWords: MnemonicWord[];
     rawText: string;
     confidence: number;
     imageDataUrl: string;
+    preOcrImageDataUrl: string;
     bip39Valid: boolean;
+    hasCompleteSequence: boolean;
+    missingIndices: number[];
   } | null> => {
-    const result = await runOcrOnRegion(OCR_ROI);
-    if (!result) return null;
+    const sceneConfig = options?.sceneConfig ?? MNEMONIC_SCENE;
+    const expectedWordCount = Math.max(
+      12,
+      Math.min(24, Math.floor(options?.expectedWordCount ?? EXPECTED_MNEMONIC_COUNT))
+    );
+    const sceneCandidates = buildMnemonicSceneCandidates(sceneConfig, expectedWordCount);
 
-    // Build a lookup: lowercase OCR word text -> Tesseract confidence
-    const wordConfidenceMap = new Map<string, number>();
-    for (const w of result.words) {
-      const clean = w.text.replace(/[^a-zA-Z]/g, '').toLowerCase();
-      if (clean.length >= 2) {
-        wordConfidenceMap.set(clean, w.confidence);
+    // Extract numbered mnemonic words.
+    const mnemonicPattern = new RegExp(
+      '(?:^|\\s)([0-9A-Za-z|!]{1,2})\\s*[.。,，:;：)]?\\s*([a-zA-Z]{3,8})\\b',
+      'gi'
+    );
+    const compactMnemonicPattern = new RegExp(
+      '(?:^|\\s)([0-9A-Za-z|!]{1,2})([a-zA-Z]{3,8})\\b',
+      'gi'
+    );
+    const indexedWords = new Map<number, MnemonicWord>();
+    let bestSceneResult: {
+      rawText: string;
+      confidence: number;
+      imageDataUrl: string;
+      preOcrImageDataUrl: string;
+      words: OcrWord[];
+    } | null = null;
+    let aggregatedRawText = '';
+
+    const buildWordConfidenceMap = (ocrWords: OcrWord[]) => {
+      const map = new Map<string, number>();
+      for (const w of ocrWords) {
+        const clean = w.text.replace(/[^a-zA-Z]/g, '').toLowerCase();
+        if (clean.length >= 2) {
+          map.set(clean, w.confidence);
+        }
+      }
+      return map;
+    };
+
+    const upsertCandidateByConfidence = (
+      index: number,
+      ocrWord: string,
+      wordConf: number,
+      mode: 'default' | 'column-row' = 'default'
+    ) => {
+      if (index < 1 || index > expectedWordCount) return;
+      const normalizedWord = ocrWord.toLowerCase();
+      const correction = correctToBip39(normalizedWord);
+      const candidate: MnemonicWord = {
+        index,
+        word: correction.word,
+        original: correction.corrected ? normalizedWord : undefined,
+        wordConfidence: wordConf,
+      };
+      const existing = indexedWords.get(index);
+      if (!existing) {
+        indexedWords.set(index, candidate);
+        return;
+      }
+      if (mode === 'column-row') {
+        const shouldReplace = candidate.wordConfidence >= existing.wordConfidence * 0.85;
+        if (shouldReplace) {
+          indexedWords.set(index, candidate);
+        }
+        return;
+      }
+      if (candidate.wordConfidence > existing.wordConfidence) {
+        indexedWords.set(index, candidate);
+      }
+    };
+
+    const upsertCandidate = (
+      index: number,
+      ocrWord: string,
+      fallbackConfidence: number,
+      confidenceMap: Map<string, number>
+    ) => {
+      const normalizedWord = ocrWord.toLowerCase();
+      const wordConf = confidenceMap.get(normalizedWord) ?? fallbackConfidence;
+      upsertCandidateByConfidence(index, normalizedWord, wordConf, 'default');
+    };
+
+    const extractIndexedFromText = (
+      rawText: string,
+      fallbackConfidence: number,
+      confidenceMap: Map<string, number>
+    ) => {
+      mnemonicPattern.lastIndex = 0;
+      let match;
+      while ((match = mnemonicPattern.exec(rawText)) !== null) {
+        const index = parseMnemonicIndexToken(match[1], expectedWordCount);
+        if (index === -1) continue;
+        const ocrWord = match[2];
+        upsertCandidate(index, ocrWord, fallbackConfidence, confidenceMap);
+      }
+
+      compactMnemonicPattern.lastIndex = 0;
+      while ((match = compactMnemonicPattern.exec(rawText)) !== null) {
+        const index = parseMnemonicIndexToken(match[1], expectedWordCount);
+        if (index === -1) continue;
+        const ocrWord = match[2];
+        upsertCandidate(index, ocrWord, fallbackConfidence, confidenceMap);
+      }
+
+      // Handles glued rows like "2.dawnI8.thought" where separator chars bleed into next index.
+      const stickyPairPattern = /([0-9A-Za-z|!]{1,2})\s*[.。,，:;：)]\s*([a-zA-Z]{3,10}?)(?=(?:\s*[Iil|!]{0,1}\s*[0-9A-Za-z|!]{1,2}\s*[.。,，:;：)]|\s*$))/gi;
+      while ((match = stickyPairPattern.exec(rawText)) !== null) {
+        const index = parseMnemonicIndexToken(match[1], expectedWordCount);
+        if (index === -1) continue;
+        const ocrWord = match[2];
+        upsertCandidate(index, ocrWord, fallbackConfidence, confidenceMap);
+      }
+    };
+
+    const extractIndexedFromTokenPairs = (
+      ocrWords: OcrWord[],
+      fallbackConfidence: number,
+      confidenceMap: Map<string, number>
+    ) => {
+      const tokens = ocrWords
+        .map((item) => item.text.trim())
+        .filter((token) => token.length > 0);
+
+      for (let i = 0; i < tokens.length; i++) {
+        const current = tokens[i];
+        const compactMatch = current.match(/^([#＃]?[0-9A-Za-z|!]{1,2})[.。,，:;：)]([a-zA-Z]{3,8})$/);
+        if (compactMatch) {
+          const index = parseMnemonicIndexToken(compactMatch[1], expectedWordCount);
+          if (index !== -1) {
+            upsertCandidate(index, compactMatch[2], fallbackConfidence, confidenceMap);
+            continue;
+          }
+        }
+
+        const index = parseMnemonicIndexToken(current, expectedWordCount);
+        if (index === -1) continue;
+        const next = tokens[i + 1];
+        if (!next) continue;
+        const nextWord = next.replace(/[^a-zA-Z]/g, '');
+        if (nextWord.length < 3 || nextWord.length > 8) continue;
+        upsertCandidate(index, nextWord, fallbackConfidence, confidenceMap);
+      }
+    };
+
+    const extractColumnWordsByBoxes = (
+      ocrWords: OcrWord[],
+      columnHeight: number
+    ): Array<{ word: string; confidence: number; y: number }> => {
+      const entries = ocrWords
+        .map((item) => {
+          const word = item.text.replace(/[^a-zA-Z]/g, '').toLowerCase();
+          const yCenter = item.y + item.h / 2;
+          return {
+            word,
+            confidence: item.confidence,
+            y: yCenter,
+          };
+        })
+        .filter((item) => item.word.length >= 3 && item.word.length <= 8)
+        .sort((a, b) => a.y - b.y);
+
+      if (entries.length === 0) return [];
+
+      const rowTolerance = Math.max(10, Math.round((columnHeight / 6) * 0.35));
+      const groups: Array<{
+        yMean: number;
+        items: Array<{ word: string; confidence: number; y: number }>;
+      }> = [];
+
+      for (const entry of entries) {
+        const last = groups[groups.length - 1];
+        if (!last || Math.abs(entry.y - last.yMean) > rowTolerance) {
+          groups.push({ yMean: entry.y, items: [entry] });
+          continue;
+        }
+        last.items.push(entry);
+        last.yMean = last.items.reduce((sum, item) => sum + item.y, 0) / last.items.length;
+      }
+
+      return groups.slice(0, 6).map((group) => {
+        const best = [...group.items].sort((a, b) => b.confidence - a.confidence)[0];
+        return {
+          word: best.word,
+          confidence: best.confidence,
+          y: group.yMean,
+        };
+      });
+    };
+
+    const applyColumnRows = (
+      rowWords: Array<{ word: string; confidence: number; y: number }>,
+      startIndex: number,
+      endIndex: number,
+      columnHeight: number
+    ) => {
+      if (rowWords.length === 0) return;
+
+      const slotCount = endIndex - startIndex + 1;
+      const maxShift = Math.max(0, slotCount - rowWords.length);
+      const rowHeight = columnHeight / slotCount;
+      const estimatedShift = Math.max(
+        0,
+        Math.min(maxShift, Math.round(rowWords[0].y / rowHeight - 0.5))
+      );
+
+      const topAlignedDense = rowWords.length >= 5 && rowWords[0].y <= columnHeight / 3;
+      let bestShift = topAlignedDense ? 0 : estimatedShift;
+      let bestScore = Number.NEGATIVE_INFINITY;
+
+      if (!topAlignedDense) {
+        for (let shift = 0; shift <= maxShift; shift++) {
+          let score = -Math.abs(shift - estimatedShift) * 0.25;
+          rowWords.forEach((entry, rowIdx) => {
+            const index = startIndex + shift + rowIdx;
+            const existing = indexedWords.get(index);
+            if (!existing) return;
+            const corrected = correctToBip39(entry.word).word;
+            if (existing.word === corrected) {
+              score += 2;
+            } else if (levenshteinDistance(existing.word, corrected) <= 1) {
+              score += 1;
+            }
+          });
+          if (score > bestScore) {
+            bestScore = score;
+            bestShift = shift;
+          }
+        }
+      }
+
+      rowWords.forEach((entry, rowIdx) => {
+        const index = startIndex + bestShift + rowIdx;
+        if (index > endIndex) return;
+        upsertCandidateByConfidence(index, entry.word, entry.confidence, 'column-row');
+      });
+    };
+
+    for (let i = 0; i < sceneCandidates.length; i++) {
+      const scene = sceneCandidates[i];
+      const sceneResult = await runOcrOnRegion(scene, {
+        onImageForOcr: options?.onImageForOcr,
+        frameCanvas: options?.frameCanvas,
+        ocrParams: MNEMONIC_OCR_PARAMS,
+        layoutHint: 'mnemonic',
+        expectedWordCount,
+      });
+      if (!sceneResult) continue;
+
+      if (!bestSceneResult || sceneResult.confidence > bestSceneResult.confidence) {
+        bestSceneResult = sceneResult;
+      }
+
+      aggregatedRawText += `${aggregatedRawText ? '\n' : ''}[SCENE ${i + 1}] ${scene.roi.x},${scene.roi.y},${scene.roi.width},${scene.roi.height}\n${sceneResult.rawText}`;
+      const confidenceMap = buildWordConfidenceMap(sceneResult.words);
+      extractIndexedFromText(sceneResult.rawText, sceneResult.confidence, confidenceMap);
+      extractIndexedFromTokenPairs(sceneResult.words, sceneResult.confidence, confidenceMap);
+
+      if (indexedWords.size === expectedWordCount) {
+        break;
       }
     }
 
-    // Extract numbered mnemonic words
-    const mnemonicPattern = /(\d+)\.\s*([a-zA-Z]{3,12})/g;
-    const mnemonicWords: MnemonicWord[] = [];
-    let match;
+    if (!bestSceneResult) return null;
 
-    while ((match = mnemonicPattern.exec(result.rawText)) !== null) {
-      const index = parseInt(match[1], 10);
-      const ocrWord = match[2].toLowerCase();
-
-      // Auto-correct against BIP39 wordlist
-      const correction = correctToBip39(ocrWord);
-      const wordConf = wordConfidenceMap.get(ocrWord) ?? result.confidence;
-
-      mnemonicWords.push({
-        index,
-        word: correction.word,
-        original: correction.corrected ? ocrWord : undefined,
-        wordConfidence: wordConf,
-      });
+    // Last-resort fallback for 18/24: if indices are unreadable but OCR text has enough BIP39-like words,
+    // map sequentially so the flow can continue and surface concrete words for debugging.
+    if (indexedWords.size === 0 && expectedWordCount >= 18) {
+      const tokens = (aggregatedRawText.match(/[a-zA-Z]{3,8}/g) || [])
+        .map((token) => token.toLowerCase());
+      const orderedWords: string[] = [];
+      for (const token of tokens) {
+        const corrected = correctToBip39(token).word;
+        const isLikelyBip39 = bip39English.includes(token) || levenshteinDistance(token, corrected) <= 1;
+        if (!isLikelyBip39) continue;
+        orderedWords.push(corrected);
+        if (orderedWords.length >= expectedWordCount) break;
+      }
+      if (orderedWords.length >= expectedWordCount) {
+        for (let i = 0; i < expectedWordCount; i++) {
+          upsertCandidateByConfidence(i + 1, orderedWords[i], bestSceneResult.confidence, 'default');
+        }
+        console.warn(
+          `[CameraPanel] Mnemonic OCR used sequential fallback for ${expectedWordCount} words (indices unreadable).`
+        );
+      }
     }
 
+    // If direct indexed parsing is incomplete, run per-column OCR on the same frame
+    // and fill missing slots by row order. This is strategy-level fallback, not image filtering.
+    if (
+      indexedWords.size < expectedWordCount
+      && OCR_BACKEND !== 'paddleocr_en'
+      && expectedWordCount === 12
+    ) {
+      const video = videoRef.current;
+      const sharedFrameCanvas = options?.frameCanvas
+        ?? (video && video.readyState >= 2 ? captureRotatedFrameCanvas(video) : undefined);
+
+      if (sharedFrameCanvas) {
+        const centerGap = 24;
+        const leftWidth = Math.floor((sceneConfig.roi.width - centerGap) / 2);
+        const rightWidth = sceneConfig.roi.width - centerGap - leftWidth;
+        const leftScene: OcrSceneConfig = {
+          ...sceneConfig,
+          roi: {
+            x: sceneConfig.roi.x,
+            y: sceneConfig.roi.y,
+            width: leftWidth,
+            height: sceneConfig.roi.height,
+          },
+        };
+        const rightScene: OcrSceneConfig = {
+          ...sceneConfig,
+          roi: {
+            x: sceneConfig.roi.x + leftWidth + centerGap,
+            y: sceneConfig.roi.y,
+            width: rightWidth,
+            height: sceneConfig.roi.height,
+          },
+        };
+
+        const leftResult = await runOcrOnRegion(leftScene, {
+          frameCanvas: sharedFrameCanvas,
+          ocrParams: MNEMONIC_COLUMN_OCR_PARAMS,
+        });
+        const rightResult = await runOcrOnRegion(rightScene, {
+          frameCanvas: sharedFrameCanvas,
+          ocrParams: MNEMONIC_COLUMN_OCR_PARAMS,
+        });
+
+        if (leftResult) {
+          aggregatedRawText += `\n[LEFT]\n${leftResult.rawText}`;
+          const leftConfidenceMap = buildWordConfidenceMap(leftResult.words);
+          extractIndexedFromText(leftResult.rawText, leftResult.confidence, leftConfidenceMap);
+          extractIndexedFromTokenPairs(leftResult.words, leftResult.confidence, leftConfidenceMap);
+          const leftRows = extractColumnWordsByBoxes(leftResult.words, leftScene.roi.height);
+          applyColumnRows(leftRows, 1, 6, leftScene.roi.height);
+        }
+
+        if (rightResult) {
+          aggregatedRawText += `\n[RIGHT]\n${rightResult.rawText}`;
+          const rightConfidenceMap = buildWordConfidenceMap(rightResult.words);
+          extractIndexedFromText(rightResult.rawText, rightResult.confidence, rightConfidenceMap);
+          extractIndexedFromTokenPairs(rightResult.words, rightResult.confidence, rightConfidenceMap);
+          const rightRows = extractColumnWordsByBoxes(rightResult.words, rightScene.roi.height);
+          applyColumnRows(rightRows, 7, 12, rightScene.roi.height);
+        }
+      }
+    }
+
+    const mnemonicWords = Array.from(indexedWords.values());
     // Sort by original index number
     mnemonicWords.sort((a, b) => a.index - b.index);
+    const hasCompleteSequence = mnemonicWords.length === expectedWordCount
+      && mnemonicWords.every((item, idx) => item.index === idx + 1);
+    const missingIndices: number[] = [];
+    for (let i = 1; i <= expectedWordCount; i++) {
+      if (!indexedWords.has(i)) {
+        missingIndices.push(i);
+      }
+    }
 
     // Validate the full mnemonic against BIP39 checksum
     let bip39Valid = false;
-    if (mnemonicWords.length >= 12) {
+    if (hasCompleteSequence) {
       const phrase = mnemonicWords.map(w => w.word).join(' ');
       try {
         bip39Valid = validateMnemonic(phrase, bip39English);
@@ -728,16 +1517,29 @@ function CameraPanel() {
       console.log(`BIP39 validation: ${bip39Valid ? 'VALID' : 'INVALID'} - "${phrase}"`);
 
       // If BIP39 invalid, attempt smart auto-correction on low-confidence words
-      if (!bip39Valid) {
+      if (!bip39Valid && ENABLE_CHECKSUM_GUIDED_AUTOCORRECT) {
         const corrected = tryBip39AutoCorrect(mnemonicWords);
         if (corrected) {
           bip39Valid = true;
           console.log(`BIP39 auto-correction succeeded!`);
         }
       }
+    } else {
+      console.log(
+        `[CameraPanel] Mnemonic OCR indices incomplete: [${mnemonicWords.map((w) => w.index).join(', ')}], missing=[${missingIndices.join(', ')}]`
+      );
     }
 
-    return { mnemonicWords, bip39Valid, ...result };
+    return {
+      rawText: aggregatedRawText || bestSceneResult.rawText,
+      confidence: bestSceneResult.confidence,
+      imageDataUrl: bestSceneResult.imageDataUrl,
+      preOcrImageDataUrl: bestSceneResult.preOcrImageDataUrl,
+      mnemonicWords,
+      bip39Valid,
+      hasCompleteSequence,
+      missingIndices,
+    };
   }, [runOcrOnRegion]);
 
   /**
@@ -755,21 +1557,45 @@ function CameraPanel() {
 
     setIsOcrProcessing(true);
     setOcrResult(null);
+    setFullFrameImageUrl(null);
     setCapturedImageUrl(null);
+    setPreOcrImageUrl(null);
+    setNumberImageUrl(null);
+    setNumberPreOcrImageUrl(null);
 
     try {
+      if (RAW_MNEMONIC_OCR_DEBUG_ONLY) {
+        const rawResult = await runOcrOnRegion(MNEMONIC_SCENE, {
+          ocrParams: MNEMONIC_OCR_PARAMS,
+        });
+        if (!rawResult) {
+          throw new Error('Raw OCR capture failed');
+        }
+        setCapturedImageUrl(rawResult.imageDataUrl);
+        setPreOcrImageUrl(rawResult.preOcrImageDataUrl);
+        setOcrResult({
+          text: formatRawOcrDebugText(rawResult.rawText, rawResult.words),
+          confidence: rawResult.confidence,
+          timestamp: new Date(),
+        });
+        return;
+      }
+
       let bestResult: {
         mnemonicWords: MnemonicWord[];
         rawText: string;
         confidence: number;
         imageDataUrl: string;
+        preOcrImageDataUrl: string;
         bip39Valid: boolean;
+        hasCompleteSequence: boolean;
+        missingIndices: number[];
       } | null = null;
 
       // Try OCR with retries
       for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
         console.log(`OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
-        
+
         const result = await runSingleOcr();
         
         if (!result) {
@@ -779,14 +1605,22 @@ function CameraPanel() {
 
         console.log(`Attempt ${attempt}: Found ${result.mnemonicWords.length} words, confidence: ${result.confidence.toFixed(0)}%`);
 
-        // Keep track of best result
-        if (!bestResult || result.mnemonicWords.length > bestResult.mnemonicWords.length) {
+        // Keep track of best result: prefer complete index sequence, then BIP39 validity, then word count.
+        const resultScore = (result.hasCompleteSequence ? 1000 : 0)
+          + (result.bip39Valid ? 500 : 0)
+          + result.mnemonicWords.length;
+        const bestScore = bestResult
+          ? ((bestResult.hasCompleteSequence ? 1000 : 0)
+            + (bestResult.bip39Valid ? 500 : 0)
+            + bestResult.mnemonicWords.length)
+          : -1;
+        if (!bestResult || resultScore > bestScore) {
           bestResult = result;
         }
 
         // Check if result meets expectations
-        if (result.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT) {
-          console.log(`Success! Found ${result.mnemonicWords.length} mnemonic words.`);
+        if (result.hasCompleteSequence && result.bip39Valid) {
+          console.log(`Success! Found complete mnemonic sequence with valid BIP39 checksum.`);
           bestResult = result;
           break;
         }
@@ -800,6 +1634,11 @@ function CameraPanel() {
 
       // Analyze the result to determine page type
       const rawText = bestResult?.rawText || '';
+
+      if (bestResult) {
+        setCapturedImageUrl(bestResult.imageDataUrl);
+        setPreOcrImageUrl(bestResult.preOcrImageDataUrl);
+      }
       
       // Check if this is a mnemonic display page (has numbered words like "1. bike")
       const hasNumberedWords = bestResult && bestResult.mnemonicWords.length >= 3;
@@ -886,21 +1725,16 @@ function CameraPanel() {
         });
       } else if (bestResult && bestResult.mnemonicWords.length > 0) {
         // Mnemonic display page - save the words and captured image
-        if (bestResult.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT) {
+        if (bestResult.hasCompleteSequence && bestResult.bip39Valid) {
           const words = bestResult.mnemonicWords.map(item => item.word);
-          setStoredMnemonic({
-            words,
-            timestamp: new Date(),
-          });
+          saveStoredMnemonic(words);
           console.log('Saved mnemonic words:', words);
         }
 
-        // Display the captured image
-        setCapturedImageUrl(bestResult.imageDataUrl);
-
-        const hasFull = bestResult.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT;
+        const hasFull = bestResult.hasCompleteSequence;
+        const canStore = hasFull && bestResult.bip39Valid;
         const hasCorrections = bestResult.mnemonicWords.some(item => item.original);
-        const statusText = hasFull
+        const statusText = canStore
           ? `✓ 已保存 ${bestResult.mnemonicWords.length} 个助记词:`
           : `识别到 ${bestResult.mnemonicWords.length} 个助记词 (预期 ${EXPECTED_MNEMONIC_COUNT} 个):`;
 
@@ -912,12 +1746,15 @@ function CameraPanel() {
           return `${item.index}. ${item.word} ${confTag}`;
         }).join('\n');
 
+        const missingLine = hasFull
+          ? ''
+          : `\n缺失编号: ${bestResult.missingIndices.join(', ') || '未知'}`;
         const validationLine = hasFull
           ? `\nBIP39 checksum: ${bestResult.bip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
           : '';
         
         setOcrResult({
-          text: `${statusText}\n${wordLines}${validationLine}`,
+          text: `${statusText}\n${wordLines}${missingLine}${validationLine}`,
           confidence: bestResult.confidence,
           timestamp: new Date(),
         });
@@ -946,7 +1783,7 @@ function CameraPanel() {
     } finally {
       setIsOcrProcessing(false);
     }
-  }, [runSingleOcr, storedMnemonic]);
+  }, [runOcrOnRegion, runSingleOcr, saveStoredMnemonic, storedMnemonic]);
 
   // Get list of video devices
   const getVideoDevices = useCallback(async () => {
@@ -1068,6 +1905,121 @@ function CameraPanel() {
       window.electronAPI?.sendCaptureFrameResponse?.(frame);
     });
 
+    // Set up IPC listener for OCR-input image capture (crop + scale only).
+    const unsubPreOcr = window.electronAPI?.onCapturePreOcrRequest?.(() => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ocrCanvas = ocrCanvasRef.current;
+      if (!video || !canvas || !ocrCanvas || video.readyState < 2) {
+        window.electronAPI?.sendCapturePreOcrResponse?.(null);
+        return;
+      }
+      const built = buildPreOcrCanvasFromVideo(video, canvas, ocrCanvas, MNEMONIC_SCENE);
+      if (!built) {
+        window.electronAPI?.sendCapturePreOcrResponse?.(null);
+        return;
+      }
+      const dataUrl = OCR_BACKEND === 'paddleocr_en'
+        ? buildPaddleInputDataUrl(ocrCanvas, MNEMONIC_SCENE.useNearestNeighbor)
+        : ocrCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+      window.electronAPI?.sendCapturePreOcrResponse?.(dataUrl);
+    });
+
+    const unsubMcpOcr = window.electronAPI?.onMcpOcrRequest?.((payload) => {
+      let settled = false;
+      const handler = (e: Event) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener('phonepilot:ocr-result', handler);
+        const detail = (e as CustomEvent).detail as {
+          success?: boolean;
+          words?: string[];
+          confidence?: number;
+          expectedWordCount?: number;
+          hasCompleteSequence?: boolean;
+          bip39Valid?: boolean;
+          reason?: string;
+        };
+        window.electronAPI?.sendMcpOcrResponse?.({
+          success: !!detail?.success,
+          words: Array.isArray(detail?.words) ? detail.words : [],
+          confidence: typeof detail?.confidence === 'number' ? detail.confidence : 0,
+          expectedWordCount:
+            typeof detail?.expectedWordCount === 'number' ? detail.expectedWordCount : undefined,
+          hasCompleteSequence:
+            typeof detail?.hasCompleteSequence === 'boolean'
+              ? detail.hasCompleteSequence
+              : undefined,
+          bip39Valid:
+            typeof detail?.bip39Valid === 'boolean' ? detail.bip39Valid : undefined,
+          reason: detail?.reason,
+        });
+      };
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('phonepilot:ocr-result', handler);
+        window.electronAPI?.sendMcpOcrResponse?.({
+          success: false,
+          words: [],
+          confidence: 0,
+          reason: 'OCR request timed out',
+        });
+      }, 45000);
+
+      window.addEventListener('phonepilot:ocr-result', handler);
+      window.dispatchEvent(new CustomEvent('phonepilot:trigger-ocr', { detail: payload || undefined }));
+    });
+
+    const unsubMcpVerify = window.electronAPI?.onMcpVerifyOcrRequest?.(() => {
+      let settled = false;
+      const handler = (e: Event) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener('phonepilot:verify-ocr-result', handler);
+        const detail = (e as CustomEvent).detail as {
+          success?: boolean;
+          optionIndex?: number;
+          wordIndex?: number;
+          correctWord?: string;
+          rawOptions?: string[];
+          matchedOptions?: string[];
+          mnemonicWords?: string[];
+          reason?: string;
+        };
+        window.electronAPI?.sendMcpVerifyOcrResponse?.({
+          success: !!detail?.success,
+          optionIndex: typeof detail?.optionIndex === 'number' ? detail.optionIndex : -1,
+          wordIndex: typeof detail?.wordIndex === 'number' ? detail.wordIndex : -1,
+          correctWord: typeof detail?.correctWord === 'string' ? detail.correctWord : '',
+          rawOptions: Array.isArray(detail?.rawOptions) ? detail.rawOptions : [],
+          matchedOptions: Array.isArray(detail?.matchedOptions) ? detail.matchedOptions : [],
+          mnemonicWords: Array.isArray(detail?.mnemonicWords) ? detail.mnemonicWords : [],
+          reason: detail?.reason,
+        });
+      };
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('phonepilot:verify-ocr-result', handler);
+        window.electronAPI?.sendMcpVerifyOcrResponse?.({
+          success: false,
+          optionIndex: -1,
+          wordIndex: -1,
+          correctWord: '',
+          rawOptions: [],
+          matchedOptions: [],
+          mnemonicWords: [],
+          reason: 'Verify OCR request timed out',
+        });
+      }, 45000);
+
+      window.addEventListener('phonepilot:verify-ocr-result', handler);
+      window.dispatchEvent(new CustomEvent('phonepilot:trigger-verify-ocr'));
+    });
+
     // Cleanup on unmount
     return () => {
       if (streamRef.current) {
@@ -1078,43 +2030,116 @@ function CameraPanel() {
         ocrWorkerRef.current = null;
       }
       unsubscribe?.();
+      unsubPreOcr?.();
+      unsubMcpOcr?.();
+      unsubMcpVerify?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [captureFrame]);
 
   // Listen for external OCR trigger events (from ControlPanel sequence executor)
   useEffect(() => {
-    const handleTriggerOcr = async () => {
-      console.log('[CameraPanel] External OCR trigger received');
+    const handleTriggerOcr = async (event: Event) => {
+      const triggerOptions = ((event as CustomEvent<OcrTriggerOptions | undefined>).detail ?? {}) as OcrTriggerOptions;
+      const expectedWordCount = Math.max(
+        12,
+        Math.min(24, Math.floor(triggerOptions.expectedWordCount ?? EXPECTED_MNEMONIC_COUNT))
+      );
+      const mergeWithStored = !!triggerOptions.mergeWithStored;
+      const allowPartial = !!triggerOptions.allowPartial;
+      const requireBip39 = triggerOptions.requireBip39 ?? true;
+
+      console.log(
+        `[CameraPanel] External OCR trigger received (expected=${expectedWordCount}, merge=${mergeWithStored}, allowPartial=${allowPartial}, requireBip39=${requireBip39})`
+      );
       setIsOcrProcessing(true);
+      setFullFrameImageUrl(null);
       setCapturedImageUrl(null);
+      setPreOcrImageUrl(null);
+      setNumberImageUrl(null);
+      setNumberPreOcrImageUrl(null);
+
+      // Start-of-capture cleanup:
+      // - 12/18 non-merge capture should drop stale words from previous runs.
+      // - 24 first-pass (merge+partial) should also start from clean state.
+      if (!mergeWithStored || allowPartial) {
+        clearStoredMnemonic();
+      }
 
       let bestWords: MnemonicWord[] = [];
       let bestConfidence = 0;
       let bestImageDataUrl = '';
+      let bestPreOcrImageDataUrl = '';
       let bestBip39Valid = false;
+      let bestHasCompleteSequence = false;
+      let bestMissingIndices: number[] = [];
+      let preOcrSaved = false;
 
       try {
+        if (RAW_MNEMONIC_OCR_DEBUG_ONLY) {
+          const rawResult = await runOcrOnRegion(MNEMONIC_SCENE, {
+            ocrParams: MNEMONIC_OCR_PARAMS,
+          });
+          if (!rawResult) {
+            throw new Error('Raw OCR capture failed');
+          }
+
+          setCapturedImageUrl(rawResult.imageDataUrl);
+          setPreOcrImageUrl(rawResult.preOcrImageDataUrl);
+          setOcrResult({
+            text: formatRawOcrDebugText(rawResult.rawText, rawResult.words),
+            confidence: rawResult.confidence,
+            timestamp: new Date(),
+          });
+
+          window.dispatchEvent(
+            new CustomEvent('phonepilot:ocr-result', {
+              detail: {
+                success: false,
+                words: [],
+                confidence: rawResult.confidence,
+                reason: 'Raw mnemonic OCR debug mode enabled',
+              },
+            })
+          );
+          return;
+        }
+
         for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
           console.log(`[CameraPanel] OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
-          const result = await runSingleOcr();
+          const result = await runSingleOcr({
+            onImageForOcr: (dataUrl) => {
+              if (!preOcrSaved && window.electronAPI?.saveCaptureToDownloads) {
+                preOcrSaved = true;
+                window.electronAPI.saveCaptureToDownloads(dataUrl, 'ocr-trigger').catch((err) =>
+                  console.warn('[CameraPanel] Failed to save capture to Downloads:', err)
+                );
+              }
+            },
+            expectedWordCount,
+          });
           if (!result) continue;
 
-          if (result.mnemonicWords.length > bestWords.length) {
+          const resultScore = (result.hasCompleteSequence ? 1000 : 0)
+            + (result.bip39Valid ? 500 : 0)
+            + result.mnemonicWords.length;
+          const bestScore = (bestHasCompleteSequence ? 1000 : 0)
+            + (bestBip39Valid ? 500 : 0)
+            + bestWords.length;
+
+          if (resultScore > bestScore) {
             bestWords = result.mnemonicWords;
             bestConfidence = result.confidence;
             bestImageDataUrl = result.imageDataUrl;
+            bestPreOcrImageDataUrl = result.preOcrImageDataUrl;
             bestBip39Valid = result.bip39Valid;
+            bestHasCompleteSequence = result.hasCompleteSequence;
+            bestMissingIndices = result.missingIndices;
           }
 
-          // If we found all words and BIP39 is valid, we're done
-          if (result.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT && result.bip39Valid) {
-            console.log(`[CameraPanel] Found ${result.mnemonicWords.length} words, BIP39 valid, done.`);
-            break;
-          }
-
-          if (result.mnemonicWords.length >= EXPECTED_MNEMONIC_COUNT) {
-            console.log(`[CameraPanel] Found ${result.mnemonicWords.length} words (BIP39 ${result.bip39Valid ? 'valid' : 'invalid'}), done.`);
+          const captureReady = result.hasCompleteSequence && (!requireBip39 || result.bip39Valid);
+          if (captureReady) {
+            console.log('[CameraPanel] Found capture-ready mnemonic OCR result.');
             break;
           }
 
@@ -1123,15 +2148,94 @@ function CameraPanel() {
           }
         }
 
-        const words = bestWords.map((w) => w.word);
+        const indexedToWords = (items: MnemonicWord[]): string[] =>
+          items
+            .slice()
+            .sort((a, b) => a.index - b.index)
+            .map((item) => item.word);
+
+        const indexedToMap = (items: MnemonicWord[]): Map<number, string> => {
+          const map = new Map<number, string>();
+          items.forEach((item) => {
+            if (item.index >= 1 && item.index <= expectedWordCount) {
+              map.set(item.index, item.word);
+            }
+          });
+          return map;
+        };
+
+        const buildContiguousWords = (wordMap: Map<number, string>): string[] => {
+          const output: string[] = [];
+          for (let i = 1; i <= expectedWordCount; i++) {
+            const word = wordMap.get(i);
+            if (!word) break;
+            output.push(word);
+          }
+          return output;
+        };
+
+        const buildSparseWords = (wordMap: Map<number, string>): string[] =>
+          Array.from({ length: expectedWordCount }, (_, idx) => wordMap.get(idx + 1) ?? '');
+
+        const collectMissingIndices = (wordMap: Map<number, string>): number[] => {
+          const missing: number[] = [];
+          for (let i = 1; i <= expectedWordCount; i++) {
+            if (!wordMap.has(i)) {
+              missing.push(i);
+            }
+          }
+          return missing;
+        };
+
+        let words = indexedToWords(bestWords);
+        let effectiveMissingIndices = [...bestMissingIndices];
+        let mergedWordMap: Map<number, string> | null = null;
+        if (mergeWithStored && bestWords.length > 0) {
+          const mergedByIndex = new Map<number, string>();
+          const useStoredMergeBase = !allowPartial;
+          if (useStoredMergeBase && storedMnemonic?.words?.length) {
+            storedMnemonic.words.forEach((word, idx) => {
+              if (word) mergedByIndex.set(idx + 1, word);
+            });
+          }
+          for (const item of bestWords) {
+            mergedByIndex.set(item.index, item.word);
+          }
+          mergedWordMap = mergedByIndex;
+          words = buildContiguousWords(mergedByIndex);
+          effectiveMissingIndices = collectMissingIndices(mergedByIndex);
+        } else if (mergeWithStored && bestWords.length === 0 && storedMnemonic?.words?.length) {
+          const storedMap = indexedToMap(
+            storedMnemonic.words.map((word, idx) => ({
+              index: idx + 1,
+              word,
+              wordConfidence: 0,
+            }))
+          );
+          mergedWordMap = storedMap;
+          words = buildContiguousWords(storedMap);
+          effectiveMissingIndices = collectMissingIndices(storedMap);
+        }
+
+        const hasFull = mergeWithStored
+          ? effectiveMissingIndices.length === 0
+          : bestHasCompleteSequence;
+        let finalBip39Valid = bestBip39Valid;
+        if (mergeWithStored && hasFull) {
+          try {
+            finalBip39Valid = validateMnemonic(words.join(' '), bip39English);
+          } catch {
+            finalBip39Valid = false;
+          }
+        }
 
         // Update local CameraPanel display
         if (bestWords.length > 0) {
           // Display the captured image
           setCapturedImageUrl(bestImageDataUrl);
+          setPreOcrImageUrl(bestPreOcrImageDataUrl);
 
           const hasCorrections = bestWords.some(w => w.original);
-          const hasFull = bestWords.length >= EXPECTED_MNEMONIC_COUNT;
 
           const wordLines = bestWords.map((w) => {
             const confTag = `[${w.wordConfidence.toFixed(0)}%]`;
@@ -1141,32 +2245,75 @@ function CameraPanel() {
             return `${w.index}. ${w.word} ${confTag}`;
           }).join('\n');
 
+          const missingLine = hasFull
+            ? ''
+            : `\n缺失编号: ${effectiveMissingIndices.join(', ') || '未知'}`;
           const validationLine = hasFull
-            ? `\nBIP39 checksum: ${bestBip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
+            ? `\nBIP39 checksum: ${finalBip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
             : '';
 
           setOcrResult({
-            text: `✓ 自动识别到 ${bestWords.length} 个助记词:\n${wordLines}${validationLine}`,
+            text: `✓ 自动识别到 ${bestWords.length} 个助记词:\n${wordLines}${missingLine}${validationLine}`,
             confidence: bestConfidence,
             timestamp: new Date(),
           });
 
-          if (words.length >= EXPECTED_MNEMONIC_COUNT) {
-            setStoredMnemonic({ words, timestamp: new Date() });
+          if (mergeWithStored && mergedWordMap && mergedWordMap.size > 0) {
+            const sparseStoredWords = buildSparseWords(mergedWordMap);
+            saveStoredMnemonic(sparseStoredWords);
+            if (allowPartial) {
+              const partialIndices = Array.from(mergedWordMap.keys()).sort((a, b) => a - b);
+              console.log(`[CameraPanel] Stored partial mnemonic indices: ${partialIndices.join(', ')}`);
+            }
+          } else if (hasFull && finalBip39Valid) {
+            saveStoredMnemonic(words);
+          }
+        }
+
+        const triggerSuccess = allowPartial
+          ? words.length > 0
+          : (hasFull && (!requireBip39 || finalBip39Valid));
+        let triggerReason: string | undefined;
+        if (!triggerSuccess) {
+          if (words.length === 0) {
+            triggerReason = 'No mnemonic words recognized';
+          } else if (!hasFull) {
+            triggerReason =
+              `Incomplete mnemonic words: ${words.length}/${expectedWordCount}` +
+              (effectiveMissingIndices.length > 0
+                ? ` (missing indices: ${effectiveMissingIndices.join(', ')})`
+                : '');
+          } else if (requireBip39 && !finalBip39Valid) {
+            triggerReason = 'Mnemonic checksum invalid';
+          } else {
+            triggerReason = 'Mnemonic OCR did not meet capture requirements';
           }
         }
 
         // Dispatch result back to sequence executor
         window.dispatchEvent(
           new CustomEvent('phonepilot:ocr-result', {
-            detail: { words, confidence: bestConfidence },
+            detail: {
+              success: triggerSuccess,
+              words,
+              confidence: bestConfidence,
+              expectedWordCount,
+              hasCompleteSequence: hasFull,
+              bip39Valid: finalBip39Valid,
+              reason: triggerReason,
+            },
           })
         );
       } catch (err) {
         console.error('[CameraPanel] Triggered OCR failed:', err);
         window.dispatchEvent(
           new CustomEvent('phonepilot:ocr-result', {
-            detail: { words: [], confidence: 0 },
+            detail: {
+              success: false,
+              words: [],
+              confidence: 0,
+              reason: err instanceof Error ? err.message : 'Unknown OCR error',
+            },
           })
         );
       } finally {
@@ -1176,151 +2323,206 @@ function CameraPanel() {
 
     window.addEventListener('phonepilot:trigger-ocr', handleTriggerOcr);
     return () => window.removeEventListener('phonepilot:trigger-ocr', handleTriggerOcr);
-  }, [runSingleOcr]);
+  }, [clearStoredMnemonic, runOcrOnRegion, runSingleOcr, saveStoredMnemonic, storedMnemonic]);
 
   // Listen for verification OCR trigger events (from ControlPanel verification steps)
   useEffect(() => {
-    /**
-     * Fuzzy match an OCR word against stored mnemonic words.
-     * Returns the best matching mnemonic word if similarity is high enough.
-     */
-    const fuzzyMatchMnemonic = (ocrWord: string, mnemonicWords: string[]): string | null => {
-      // Exact match
-      if (mnemonicWords.includes(ocrWord)) return ocrWord;
-      // Prefix/substring match
-      for (const w of mnemonicWords) {
-        if (w.startsWith(ocrWord) || ocrWord.startsWith(w)) return w;
-      }
-      // Character overlap: at least 60% of characters match in order
-      for (const w of mnemonicWords) {
-        const shorter = Math.min(ocrWord.length, w.length);
-        if (shorter < 2) continue;
-        let matches = 0;
-        let j = 0;
-        for (let i = 0; i < ocrWord.length && j < w.length; i++) {
-          if (ocrWord[i] === w[j]) { matches++; j++; }
-        }
-        if (matches >= shorter * 0.6 && matches >= 2) return w;
-      }
-      return null;
-    };
-
     const handleTriggerVerifyOcr = async () => {
       console.log('[CameraPanel] Verification OCR trigger received');
       setIsOcrProcessing(true);
+      setFullFrameImageUrl(null);
       setCapturedImageUrl(null);
+      setPreOcrImageUrl(null);
       setNumberImageUrl(null);
+      setNumberPreOcrImageUrl(null);
 
       try {
-        // --- Pass 1: Focused number OCR to detect "#N" (digits-only, 4x upscale) ---
-        let wordIndex = -1;
-        let numberImageUrl = '';
-        let numberRawText = '';
-        let numberConfidence = 0;
+        const video = videoRef.current;
+        if (!video || video.readyState < 2) {
+          throw new Error('Video not ready for verification OCR');
+        }
+
+        type VerifyAttempt = {
+          wordIndex: number;
+          numberImageDataUrl: string;
+          numberPreOcrDataUrl: string;
+          numberRawText: string;
+          numberConfidence: number;
+          optionsText: string;
+          optionsRawWords: string[];
+          optionsConfidence: number;
+          optionsImageDataUrl: string;
+          optionsPreOcrDataUrl: string;
+          fullFrameImageDataUrl: string;
+        };
+
+        let verifyNumberSaved = false;
+        let verifyOptionsSaved = false;
+        let selectedAttempt: VerifyAttempt | null = null;
+        const verifyMaxIndex = Math.max(
+          12,
+          Math.min(24, Math.floor(storedMnemonic?.words?.length ?? 12))
+        );
+
         for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
-          console.log(`[CameraPanel] Verify number OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
-          const numberResult = await runNumberOcr();
+          console.log(`[CameraPanel] Verify OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
+          const frameCanvas = captureRotatedFrameCanvas(video);
+          const fullFrameImageDataUrl = frameCanvas.toDataURL('image/jpeg', OCR_JPEG_QUALITY);
+
+          let wordIndex = -1;
+          let numberImageDataUrl = '';
+          let numberPreOcrDataUrl = '';
+          let numberRawText = '';
+          let numberConfidence = 0;
+
+          const numberResult = await runNumberOcr({
+            frameCanvas,
+            maxIndex: verifyMaxIndex,
+            onImageForOcr: (dataUrl) => {
+              if (!verifyNumberSaved && window.electronAPI?.saveCaptureToDownloads) {
+                verifyNumberSaved = true;
+                window.electronAPI.saveCaptureToDownloads(dataUrl, 'verify-number').catch((err) =>
+                  console.warn('[CameraPanel] Failed to save verify-number capture:', err)
+                );
+              }
+            },
+          });
 
           if (numberResult) {
             wordIndex = numberResult.number;
-            numberImageUrl = numberResult.imageDataUrl;
+            numberImageDataUrl = numberResult.imageDataUrl;
+            numberPreOcrDataUrl = numberResult.preOcrImageDataUrl;
             numberRawText = numberResult.rawText.trim();
             numberConfidence = numberResult.confidence;
-            console.log(`[CameraPanel] Detected #${wordIndex} (confidence: ${numberResult.confidence.toFixed(0)}%)`);
+          }
+
+          const targetWord = storedMnemonic && wordIndex >= 1
+            ? storedMnemonic.words[wordIndex - 1]
+            : undefined;
+          const optionsResult = await runVerifyOptionsOcr({
+            frameCanvas,
+            targetWord,
+            onImageForOcr: (dataUrl) => {
+              if (!verifyOptionsSaved && window.electronAPI?.saveCaptureToDownloads) {
+                verifyOptionsSaved = true;
+                window.electronAPI.saveCaptureToDownloads(dataUrl, 'verify-options').catch((err) =>
+                  console.warn('[CameraPanel] Failed to save verify-options capture:', err)
+                );
+              }
+            },
+          });
+
+          if (!optionsResult) {
+            if (attempt < MAX_OCR_RETRIES) {
+              await new Promise((resolve) => setTimeout(resolve, OCR_RETRY_DELAY));
+            }
+            continue;
+          }
+
+          const candidate: VerifyAttempt = {
+            wordIndex,
+            numberImageDataUrl,
+            numberPreOcrDataUrl,
+            numberRawText,
+            numberConfidence,
+            optionsText: optionsResult.rawText,
+            optionsRawWords: optionsResult.rawOptions,
+            optionsConfidence: optionsResult.confidence,
+            optionsImageDataUrl: optionsResult.imageDataUrl,
+            optionsPreOcrDataUrl: optionsResult.preOcrImageDataUrl,
+            fullFrameImageDataUrl,
+          };
+          const rawOptions = candidate.optionsRawWords;
+          selectedAttempt = candidate;
+
+          console.log(
+            `[CameraPanel] Verify attempt #${attempt}: index=${candidate.wordIndex}, options=${rawOptions.join(', ') || '(empty)'}, optionsConf=${candidate.optionsConfidence.toFixed(0)}%`
+          );
+
+          if (candidate.wordIndex >= 1 && candidate.wordIndex <= verifyMaxIndex && rawOptions.length >= 3) {
             break;
           }
 
-          // Even if number detection failed, keep the last image for debugging
-          if (!numberImageUrl) {
-            // Re-capture a frame just for the image (use runOcrOnRegion which returns imageDataUrl)
-            const fallbackResult = await runOcrOnRegion(VERIFY_NUMBER_ROI);
-            if (fallbackResult) {
-              numberImageUrl = fallbackResult.imageDataUrl;
-              numberRawText = fallbackResult.rawText.trim();
-              numberConfidence = fallbackResult.confidence;
-            }
-          }
-
           if (attempt < MAX_OCR_RETRIES) {
             await new Promise((resolve) => setTimeout(resolve, OCR_RETRY_DELAY));
           }
         }
 
-        // Show the number region image for debugging
-        if (numberImageUrl) {
-          setNumberImageUrl(numberImageUrl);
+        if (!selectedAttempt) {
+          throw new Error('Failed to OCR verification regions');
         }
 
-        console.log(`[CameraPanel] Final detected word index: #${wordIndex}`);
+        const wordIndex = selectedAttempt.wordIndex;
+        const numberRawText = selectedAttempt.numberRawText;
+        const numberConfidence = selectedAttempt.numberConfidence;
+        const optionsConfidence = selectedAttempt.optionsConfidence;
+        const rawOptions = selectedAttempt.optionsRawWords;
 
-        // --- Pass 2: OCR on options region (bottom of screen) to detect 3 words ---
-        let optionsText = '';
-        let optionsConfidence = 0;
-        let optionsImageDataUrl = '';
+        setFullFrameImageUrl(selectedAttempt.fullFrameImageDataUrl);
+        setNumberImageUrl(selectedAttempt.numberImageDataUrl || null);
+        setNumberPreOcrImageUrl(selectedAttempt.numberPreOcrDataUrl || null);
+        setCapturedImageUrl(selectedAttempt.optionsImageDataUrl || null);
+        setPreOcrImageUrl(selectedAttempt.optionsPreOcrDataUrl || null);
 
-        for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
-          console.log(`[CameraPanel] Verify options OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
-          const optionsResult = await runOcrOnRegion(VERIFY_OPTIONS_ROI);
-          if (!optionsResult) continue;
-
-          console.log(`[CameraPanel] Options region text: "${optionsResult.rawText.trim()}", confidence: ${optionsResult.confidence.toFixed(0)}%`);
-
-          if (optionsResult.confidence > optionsConfidence) {
-            optionsText = optionsResult.rawText;
-            optionsConfidence = optionsResult.confidence;
-            optionsImageDataUrl = optionsResult.imageDataUrl;
-          }
-
-          if (optionsResult.confidence >= 50) break;
-
-          if (attempt < MAX_OCR_RETRIES) {
-            await new Promise((resolve) => setTimeout(resolve, OCR_RETRY_DELAY));
-          }
-        }
-
-        // Display the options region image
-        setCapturedImageUrl(optionsImageDataUrl);
+        const hasStoredMnemonic = !!storedMnemonic && storedMnemonic.words.length > 0;
 
         // Look up the correct word from stored mnemonic
-        const correctWord = storedMnemonic && wordIndex >= 1
+        const correctWord = hasStoredMnemonic && wordIndex >= 1
           ? storedMnemonic.words[wordIndex - 1]
           : null;
 
-        // Extract and fuzzy-match option words against stored mnemonic
-        const allWords = optionsText
-          .split(/[\s\n]+/)
-          .map(w => w.toLowerCase().replace(/[^a-z]/g, ''))
-          .filter(w => w.length >= 2);
-
-        // Match each OCR word against stored mnemonic with fuzzy logic
-        const matchedOptions: string[] = [];
-        if (storedMnemonic) {
-          for (const ocrWord of allWords) {
-            const matched = fuzzyMatchMnemonic(ocrWord, storedMnemonic.words);
-            if (matched && !matchedOptions.includes(matched)) {
-              matchedOptions.push(matched);
-            }
-          }
-        }
+        // Option mapping keeps slot order and avoids permissive fuzzy fallback.
+        const mappedOptions = hasStoredMnemonic
+          ? rawOptions.map((option) =>
+            mapOptionToMnemonicStrict(option, storedMnemonic.words) ?? option
+          )
+          : rawOptions;
 
         // Find which option index matches the correct word
         let optionIndex = -1;
-        if (correctWord && matchedOptions.length > 0) {
-          optionIndex = matchedOptions.indexOf(correctWord);
+        if (correctWord && mappedOptions.length > 0) {
+          optionIndex = mappedOptions.indexOf(correctWord);
         }
 
-        console.log(`[CameraPanel] Verify: word #${wordIndex}, correct="${correctWord}", options=[${matchedOptions.join(', ')}], optionIndex=${optionIndex}`);
+        console.log(
+          `[CameraPanel] Verify: word #${wordIndex}, hasStored=${hasStoredMnemonic}, correct="${correctWord}", raw=[${rawOptions.join(', ')}], mapped=[${mappedOptions.join(', ')}], optionIndex=${optionIndex}`
+        );
 
         // Update display
         let resultText = `验证单词 #${wordIndex}`;
         resultText += ` (数字OCR: "${numberRawText}", 置信度: ${numberConfidence.toFixed(0)}%)\n`;
+        resultText += `助记词状态: ${hasStoredMnemonic ? `已加载 ${storedMnemonic.words.length} 个词` : '未加载'}\n`;
         resultText += `正确答案: ${correctWord?.toUpperCase() || '未知'}\n`;
-        resultText += `识别选项: ${matchedOptions.join(', ')}\n`;
+        if (hasStoredMnemonic) {
+          resultText += `目标助记词: #${wordIndex} = ${correctWord || '(未知)'}\n`;
+          resultText += `助记词表: ${storedMnemonic.words.map((word, idx) => `${idx + 1}.${word}`).join(', ')}\n`;
+        }
+        resultText += `原始OCR选项: ${rawOptions.join(', ') || '(空)'}\n`;
+        resultText += `映射选项: ${mappedOptions.join(', ') || '(空)'}\n`;
         if (optionIndex >= 0) {
-          resultText += `\n-> 点击选项 ${optionIndex + 1}: ${matchedOptions[optionIndex].toUpperCase()}`;
+          resultText += `\n-> 点击选项 ${optionIndex + 1}: ${mappedOptions[optionIndex].toUpperCase()}`;
+        } else if (!hasStoredMnemonic) {
+          resultText += '\n-> 未加载助记词，无法自动确定正确选项';
+        } else if (wordIndex < 1) {
+          resultText += '\n-> 未能识别要验证的单词序号';
         } else {
           resultText += '\n-> 未找到匹配选项';
         }
+
+        const verifySuccess = hasStoredMnemonic && wordIndex >= 1 && optionIndex >= 0 && !!correctWord;
+        const verifyReason = verifySuccess
+          ? undefined
+          : (
+            !hasStoredMnemonic
+              ? 'Mnemonic words not loaded'
+              : wordIndex < 1
+                ? `Failed to detect verification word index (number OCR="${numberRawText || '(empty)'}")`
+                : wordIndex > storedMnemonic.words.length
+                  ? `Verification word index out of range: ${wordIndex}/${storedMnemonic.words.length}`
+                : rawOptions.length === 0
+                  ? 'No option words recognized'
+                  : `Correct word not found in detected options (wordIndex=${wordIndex}, targetWord="${correctWord || '(unknown)'}", rawOptions="${rawOptions.join(', ') || '(empty)'}", mappedOptions="${mappedOptions.join(', ') || '(empty)'}")`
+          );
 
         setOcrResult({
           text: resultText,
@@ -1331,14 +2533,32 @@ function CameraPanel() {
         // Dispatch result back to sequence executor
         window.dispatchEvent(
           new CustomEvent('phonepilot:verify-ocr-result', {
-            detail: { optionIndex, wordIndex, correctWord: correctWord || '' },
+            detail: {
+              success: verifySuccess,
+              optionIndex,
+              wordIndex,
+              correctWord: correctWord || '',
+              rawOptions,
+              matchedOptions: mappedOptions,
+              mnemonicWords: hasStoredMnemonic ? [...storedMnemonic.words] : [],
+              reason: verifyReason,
+            },
           })
         );
       } catch (err) {
         console.error('[CameraPanel] Verification OCR failed:', err);
         window.dispatchEvent(
           new CustomEvent('phonepilot:verify-ocr-result', {
-            detail: { optionIndex: -1, wordIndex: -1, correctWord: '' },
+            detail: {
+              success: false,
+              optionIndex: -1,
+              wordIndex: -1,
+              correctWord: '',
+              rawOptions: [],
+              matchedOptions: [],
+              mnemonicWords: storedMnemonic?.words ? [...storedMnemonic.words] : [],
+              reason: err instanceof Error ? err.message : 'Unknown verification OCR error',
+            },
           })
         );
       } finally {
@@ -1348,7 +2568,7 @@ function CameraPanel() {
 
     window.addEventListener('phonepilot:trigger-verify-ocr', handleTriggerVerifyOcr);
     return () => window.removeEventListener('phonepilot:trigger-verify-ocr', handleTriggerVerifyOcr);
-  }, [runOcrOnRegion, runNumberOcr, storedMnemonic]);
+  }, [runNumberOcr, runVerifyOptionsOcr, storedMnemonic]);
 
   // Handle device selection change
   const handleDeviceChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -1356,9 +2576,14 @@ function CameraPanel() {
     startCamera(deviceId);
   };
 
+  // Manually trigger verification-page OCR debug flow (single-frame dual ROI).
+  const handleVerifyDebugOcr = () => {
+    window.dispatchEvent(new CustomEvent('phonepilot:trigger-verify-ocr'));
+  };
+
   return (
     <div className="camera-panel">
-      {/* Hidden canvases for frame capture and OCR preprocessing */}
+      {/* Hidden canvases for frame capture and OCR input */}
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <canvas ref={ocrCanvasRef} style={{ display: 'none' }} />
 
@@ -1419,6 +2644,14 @@ function CameraPanel() {
         >
           {isOcrProcessing ? 'OCR...' : 'OCR 识别'}
         </button>
+        <button
+          className={`overlay-btn ocr-btn ${isOcrProcessing ? 'processing' : ''}`}
+          onClick={handleVerifyDebugOcr}
+          disabled={isOcrProcessing}
+          title="用于助记词确认页：同一帧上方数字+下方选项双区域 OCR"
+        >
+          {isOcrProcessing ? 'OCR...' : '确认页 OCR'}
+        </button>
         {storedMnemonic && (
           <span className="mnemonic-indicator" title={`已保存 ${storedMnemonic.words.length} 个助记词`}>
             ✓ {storedMnemonic.words.length}词
@@ -1438,12 +2671,41 @@ function CameraPanel() {
             </span>
             <button
               className="ocr-result-close"
-              onClick={() => { setOcrResult(null); setCapturedImageUrl(null); setNumberImageUrl(null); }}
+              onClick={() => {
+                setOcrResult(null);
+                setFullFrameImageUrl(null);
+                setCapturedImageUrl(null);
+                setPreOcrImageUrl(null);
+                setNumberImageUrl(null);
+                setNumberPreOcrImageUrl(null);
+              }}
               title="关闭"
             >
               ×
             </button>
           </div>
+          {fullFrameImageUrl && (
+            <div className="ocr-result-image-wrapper">
+              <div className="ocr-result-image-label">完整截图</div>
+              <img
+                src={fullFrameImageUrl}
+                alt="完整截图"
+                className="ocr-result-image"
+              />
+              <button
+                className="ocr-result-save-btn"
+                onClick={() => {
+                  const link = document.createElement('a');
+                  link.href = fullFrameImageUrl;
+                  link.download = `ocr-full-frame-${Date.now()}.jpg`;
+                  link.click();
+                }}
+                title="保存完整截图到本地"
+              >
+                保存完整截图
+              </button>
+            </div>
+          )}
           {numberImageUrl && (
             <div className="ocr-result-image-wrapper">
               <div className="ocr-result-image-label">数字区域截图</div>
@@ -1466,6 +2728,16 @@ function CameraPanel() {
               </button>
             </div>
           )}
+          {numberPreOcrImageUrl && (
+            <div className="ocr-result-image-wrapper">
+              <div className="ocr-result-image-label">数字区域 OCR 输入图</div>
+              <img
+                src={numberPreOcrImageUrl}
+                alt="数字区域 OCR 输入图"
+                className="ocr-result-image"
+              />
+            </div>
+          )}
           {capturedImageUrl && (
             <div className="ocr-result-image-wrapper">
               {numberImageUrl && <div className="ocr-result-image-label">选项区域截图</div>}
@@ -1485,6 +2757,28 @@ function CameraPanel() {
                 title="保存截图到本地"
               >
                 保存截图
+              </button>
+            </div>
+          )}
+          {preOcrImageUrl && (
+            <div className="ocr-result-image-wrapper">
+              <div className="ocr-result-image-label">OCR 输入图（送入 OCR 前）</div>
+              <img
+                src={preOcrImageUrl}
+                alt="OCR 输入图"
+                className="ocr-result-image"
+              />
+              <button
+                className="ocr-result-save-btn"
+                onClick={() => {
+                  const link = document.createElement('a');
+                  link.href = preOcrImageUrl;
+                  link.download = `ocr-input-${Date.now()}.jpg`;
+                  link.click();
+                }}
+                title="保存OCR输入图到本地"
+              >
+                保存OCR输入图
               </button>
             </div>
           )}

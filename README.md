@@ -26,9 +26,12 @@
 | `arm-move` | 移动机械臂到指定位置 |
 | `arm-click` | 在当前位置执行点击 |
 | `capture-frame` | 捕获当前摄像头画面 |
-| `ocr-recognize` | OCR 识别屏幕文字 (PaddleOCR) |
+| `execute-sequence` | 执行预置自动化流程（含 OCR 步骤） |
+| `stop-sequence` | 停止正在执行的流程 |
+| `confirm-action` | 点击确认/取消按钮 |
+| `input-pin` | 自动输入 PIN |
 | `mnemonic-store` | 存储/获取助记词 |
-| `mnemonic-verify` | 助记词验证选词定位 |
+| `mnemonic-verify` | 基于 OCR 选项匹配正确助记词 |
 
 ### 摄像头
 
@@ -79,9 +82,26 @@ git clone https://github.com/your-username/PhonePilot.git
 cd PhonePilot
 yarn install
 
-# 安装 OCR 依赖 (可选但推荐)
-./python/setup_ocr.sh
-# 或手动安装: pip install -r python/requirements.txt
+# 安装 OCR 依赖（建议 paddleocr 3.x）
+python3 -m pip install --user paddlepaddle==3.3.0 "paddleocr>=3,<4" opencv-python pillow pyyaml huggingface_hub
+
+# 下载 OCR 模型到本地
+python3 - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download(
+  'PaddlePaddle/en_PP-OCRv5_mobile_rec',
+  local_dir='models/ocr_bench/en_PP-OCRv5_mobile_rec'
+)
+snapshot_download(
+  'PaddlePaddle/PP-OCRv5_mobile_det',
+  local_dir='models/ocr_bench/PP-OCRv5_mobile_det'
+)
+snapshot_download(
+  'PaddlePaddle/PP-OCRv5_mobile_rec',
+  local_dir='models/ocr_bench/PP-OCRv5_mobile_rec'
+)
+print('done')
+PY
 
 yarn electron:dev
 ```
@@ -97,42 +117,52 @@ yarn build:linux         # Linux
 
 ## OCR 助记词识别
 
-PhonePilot 集成了 [EasyOCR](https://github.com/JaidedAI/EasyOCR) 用于识别屏幕上的文字，特别适用于助记词备份和验证场景。
+PhonePilot 当前 OCR 采用双路径：
+
+- 助记词页与确认页选项区：`en_PP-OCRv5_mobile_rec`
+- 确认页题号区（`#N`）：`PP-OCRv5_mobile_det + PP-OCRv5_mobile_rec`
+
+- Electron 主进程通过 IPC `paddleocr-en-recognize` 调用 Python daemon
+- Python 脚本：`scripts/paddleocr_en_infer.py`
+- 助记词页：按 2 列 6 行网格重排并输出标准化 `1..12` 文本
+- 确认页：题号区域单独走 det+multi-rec；选项区域继续走 en-rec
+- 识别后继续走现有 BIP39 校验/纠错流程
 
 ### 典型工作流程
 
-1. **捕获助记词页面** - 当设备显示助记词时，调用 `ocr-recognize` 并设置 `extractMnemonic=true`
-2. **自动存储** - 识别到的助记词会自动存储在内存中
-3. **验证选词** - 在验证页面，调用 `ocr-recognize` 获取选项，再用 `mnemonic-verify` 找到正确选项的坐标
-4. **点击选项** - 使用 `arm-move` 和 `arm-click` 点击正确位置
+1. 运行 `execute-sequence`（含 `ocrCapture` 步骤）触发助记词 OCR
+2. 识别到的助记词会写入内存（可通过 `mnemonic-store` 查询/覆盖）
+3. 验证页流程中触发 `ocrVerify`，OCR 识别题号与候选词
+4. 用 `mnemonic-verify` 匹配正确词并执行点击
 
 ### 使用示例
 
 ```typescript
-// 1. 识别并存储助记词
-await call('ocr-recognize', { extractMnemonic: true });
+// 1. 跑一条包含 OCR 的自动流程（示例序列 ID 以项目内配置为准）
+await call('execute-sequence', { sequenceId: 'one-normal-24' });
 
-// 2. 在验证页面识别选项
-const ocrResult = await call('ocr-recognize', { lang: 'en' });
+// 2. 查看当前缓存助记词
+const words = await call('mnemonic-store', { action: 'get' });
 
-// 3. 找到正确选项位置 (假设要验证第 5 个词)
-const verifyResult = await call('mnemonic-verify', {
-  wordIndex: 5,
-  ocrResults: ocrResult.results
+// 3. 手工覆盖（可选）
+await call('mnemonic-store', {
+  action: 'set',
+  words: ['abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse', 'access', 'accident']
 });
-
-// 4. 点击正确选项
-await call('arm-move', { 
-  x: verifyResult.matchedOption.centerX, 
-  y: verifyResult.matchedOption.centerY 
-});
-await call('arm-click', {});
 ```
 
-### OCR 语言支持
+### OCR 模型路径
 
-- `ch` - 中文和英文混合 (默认)
-- `en` - 仅英文
+- 默认加载：
+  - `models/ocr_bench/en_PP-OCRv5_mobile_rec`
+  - `models/ocr_bench/PP-OCRv5_mobile_det`
+  - `models/ocr_bench/PP-OCRv5_mobile_rec`
+- 可通过环境变量覆盖：
+  - `PHONEPILOT_OCR_MODEL_DIR=/absolute/path/to/en_PP-OCRv5_mobile_rec`
+  - `PHONEPILOT_OCR_DET_MODEL_DIR=/absolute/path/to/PP-OCRv5_mobile_det`
+  - `PHONEPILOT_OCR_MULTI_REC_MODEL_DIR=/absolute/path/to/PP-OCRv5_mobile_rec`
+- 可选性能参数：`PHONEPILOT_OCR_MAX_IMAGE_SIDE`（默认 1280）
+- 可选性能参数：`PHONEPILOT_OCR_CPU_THREADS`（默认 4）
 
 ## MCP 配置
 

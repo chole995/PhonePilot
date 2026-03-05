@@ -55,6 +55,27 @@ interface LogEntry {
   detail: string;
 }
 
+interface SequenceOcrResult {
+  success: boolean;
+  words: string[];
+  confidence?: number;
+  expectedWordCount?: number;
+  hasCompleteSequence?: boolean;
+  bip39Valid?: boolean;
+  reason?: string;
+}
+
+interface SequenceVerifyOcrResult {
+  success: boolean;
+  optionIndex: number;
+  wordIndex: number;
+  correctWord: string;
+  rawOptions?: string[];
+  matchedOptions?: string[];
+  mnemonicWords?: string[];
+  reason?: string;
+}
+
 function ControlPanel() {
   const [state, setState] = useState<ControlPanelState>({
     isConnected: false,
@@ -353,6 +374,8 @@ function ControlPanel() {
 
     // getFullSteps is now imported from sequences.ts
     const steps = getFullSteps(sequence);
+    const totalVerifySteps = steps.filter((step) => !!step.ocrVerify).length;
+    let finishedVerifySteps = 0;
 
     autoOperationCancelledRef.current = false;
     setState(prev => ({ ...prev, isAutoRunning: true, autoProgress: 0, error: null, capturedWords: [] }));
@@ -370,6 +393,9 @@ function ControlPanel() {
         setState(prev => ({ ...prev, autoProgress: i + 1 }));
 
         if (step.ocrVerify) {
+          const verifyRound = finishedVerifySteps + 1;
+          addLog('验证', `开始第 ${verifyRound}/${totalVerifySteps} 次确认题 OCR`);
+
           // Verification OCR step: move arm, OCR to detect word index, click correct option
           await sendCommand({
             duankou: '0',
@@ -382,9 +408,9 @@ function ControlPanel() {
           // Wait for arm to settle
           await delay(1000);
 
-          // Trigger verification OCR and wait for result (with 30s timeout)
+          // Trigger verification OCR and wait for result (with 45s timeout)
           const verifyResult = await Promise.race([
-            new Promise<{ optionIndex: number; wordIndex: number; correctWord: string }>((resolve) => {
+            new Promise<SequenceVerifyOcrResult>((resolve) => {
               const handler = (e: Event) => {
                 window.removeEventListener('phonepilot:verify-ocr-result', handler);
                 resolve((e as CustomEvent).detail);
@@ -392,41 +418,73 @@ function ControlPanel() {
               window.addEventListener('phonepilot:verify-ocr-result', handler);
               window.dispatchEvent(new CustomEvent('phonepilot:trigger-verify-ocr'));
             }),
-            new Promise<{ optionIndex: number; wordIndex: number; correctWord: string }>((resolve) =>
-              setTimeout(() => resolve({ optionIndex: -1, wordIndex: -1, correctWord: '' }), 30000)
+            new Promise<SequenceVerifyOcrResult>((resolve) =>
+              setTimeout(
+                () => resolve({
+                  success: false,
+                  optionIndex: -1,
+                  wordIndex: -1,
+                  correctWord: '',
+                  mnemonicWords: [],
+                  reason: 'Verify OCR timed out',
+                }),
+                45000
+              )
             ),
           ]);
 
-          if (verifyResult.optionIndex >= 0 && verifyResult.optionIndex < step.ocrVerify.options.length) {
-            const option = step.ocrVerify.options[verifyResult.optionIndex];
-            addLog('验证', `单词 #${verifyResult.wordIndex} -> ${verifyResult.correctWord.toUpperCase()} (选项${verifyResult.optionIndex + 1})`);
-
-            // Click the correct option: move to position -> lower stylus -> raise stylus
-            await sendCommand({
-              duankou: '0',
-              hco: state.resourceHandle,
-              daima: `X${option.x}Y${option.y}`,
-            });
-
-            await sendCommand({
-              duankou: '0',
-              hco: state.resourceHandle,
-              daima: `Z${option.depth}`,
-            });
-
-            await delay(ARM_CONTROLLER_CONFIG.clickDelay);
-
-            await sendCommand({
-              duankou: '0',
-              hco: state.resourceHandle,
-              daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
-            });
-
-            addLog('验证', `已点击选项${verifyResult.optionIndex + 1} (${option.x},${option.y})`);
-          } else {
-            addLog('验证', `验证失败: 未找到匹配选项 (单词 #${verifyResult.wordIndex})`);
+          if (!verifyResult.success) {
+            throw new Error(`验证OCR失败: ${verifyResult.reason || 'unknown reason'}`);
           }
+          if (
+            verifyResult.optionIndex < 0
+            || verifyResult.optionIndex >= step.ocrVerify.options.length
+          ) {
+            throw new Error(
+              `验证OCR返回了无效选项索引 ${verifyResult.optionIndex} (可选范围: 0-${step.ocrVerify.options.length - 1})`
+            );
+          }
+
+          const option = step.ocrVerify.options[verifyResult.optionIndex];
+          addLog('验证', `单词 #${verifyResult.wordIndex} -> ${verifyResult.correctWord.toUpperCase()} (选项${verifyResult.optionIndex + 1})`);
+          if (Array.isArray(verifyResult.mnemonicWords) && verifyResult.mnemonicWords.length > 0) {
+            addLog(
+              '验证',
+              `助记词表: ${verifyResult.mnemonicWords.map((word, idx) => `${idx + 1}.${word}`).join(', ')}`
+            );
+          }
+          if (Array.isArray(verifyResult.rawOptions) && verifyResult.rawOptions.length > 0) {
+            addLog('验证', `OCR选项: ${verifyResult.rawOptions.join(', ')}`);
+          }
+          if (Array.isArray(verifyResult.matchedOptions) && verifyResult.matchedOptions.length > 0) {
+            addLog('验证', `匹配选项: ${verifyResult.matchedOptions.join(', ')}`);
+          }
+
+          // Click the correct option: move to position -> lower stylus -> raise stylus
+          await sendCommand({
+            duankou: '0',
+            hco: state.resourceHandle,
+            daima: `X${option.x}Y${option.y}`,
+          });
+
+          await sendCommand({
+            duankou: '0',
+            hco: state.resourceHandle,
+            daima: `Z${option.depth}`,
+          });
+
+          await delay(ARM_CONTROLLER_CONFIG.clickDelay);
+
+          await sendCommand({
+            duankou: '0',
+            hco: state.resourceHandle,
+            daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
+          });
+
+          finishedVerifySteps += 1;
+          addLog('验证', `第 ${verifyRound}/${totalVerifySteps} 题已点击选项${verifyResult.optionIndex + 1} (${option.x},${option.y})`);
         } else if (step.ocrCapture) {
+          const ocrCaptureConfig = typeof step.ocrCapture === 'object' ? step.ocrCapture : {};
           // OCR capture step: move arm out of the way (no click), then trigger OCR
           await sendCommand({
             duankou: '0',
@@ -439,27 +497,37 @@ function ControlPanel() {
           // Wait for arm to settle
           await delay(1000);
 
-          // Trigger OCR and wait for result (with 30s timeout)
+          // Trigger OCR and wait for result (with 45s timeout)
           const ocrResult = await Promise.race([
-            new Promise<{ words: string[] }>((resolve) => {
+            new Promise<SequenceOcrResult>((resolve) => {
               const handler = (e: Event) => {
                 window.removeEventListener('phonepilot:ocr-result', handler);
                 resolve((e as CustomEvent).detail);
               };
               window.addEventListener('phonepilot:ocr-result', handler);
-              window.dispatchEvent(new CustomEvent('phonepilot:trigger-ocr'));
+              window.dispatchEvent(
+                new CustomEvent('phonepilot:trigger-ocr', { detail: ocrCaptureConfig })
+              );
             }),
-            new Promise<{ words: string[] }>((resolve) =>
-              setTimeout(() => resolve({ words: [] }), 30000)
+            new Promise<SequenceOcrResult>((resolve) =>
+              setTimeout(
+                () => resolve({
+                  success: false,
+                  words: [],
+                  reason: 'Mnemonic OCR timed out',
+                }),
+                45000
+              )
             ),
           ]);
 
-          if (ocrResult.words.length > 0) {
-            setState(prev => ({ ...prev, capturedWords: ocrResult.words }));
-            addLog('OCR', `识别到 ${ocrResult.words.length} 个单词: ${ocrResult.words.join(', ')}`);
-          } else {
-            addLog('OCR', '未能识别到助记词');
+          const allowPartial = !!ocrCaptureConfig.allowPartial;
+          const canContinueWithPartial = allowPartial && ocrResult.words.length > 0;
+          if ((!ocrResult.success && !canContinueWithPartial) || ocrResult.words.length === 0) {
+            throw new Error(`助记词OCR失败: ${ocrResult.reason || 'no words recognized'}`);
           }
+          setState(prev => ({ ...prev, capturedWords: ocrResult.words }));
+          addLog('OCR', `识别到 ${ocrResult.words.length} 个单词: ${ocrResult.words.join(', ')}`);
         } else if (step.swipeTo) {
           // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
           await sendCommand({
@@ -518,7 +586,7 @@ function ControlPanel() {
         }
 
         // Wait before next step (use custom delay or default 100ms for faster execution)
-        await delay(step.delayAfter ?? 100);
+        await delay(step.delayAfter ?? 250);
       }
 
       if (!autoOperationCancelledRef.current) {

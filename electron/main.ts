@@ -1,7 +1,18 @@
 import { app, BrowserWindow, ipcMain, net } from 'electron';
 import path from 'path';
 import { PhonePilotMcpServer } from './mcp';
-import { setFrameCaptureCallback, setMcpLogCallback } from './mcp/state';
+import { runPaddleOcrEn, stopPaddleOcrEnDaemon } from './paddleOcrEn';
+import {
+  setFrameCaptureCallback,
+  setMcpLogCallback,
+  setPreOcrCaptureCallback,
+  setMnemonicOcrCallback,
+  setVerifyOcrCallback,
+  type MnemonicOcrResult,
+  type MnemonicOcrRequest,
+  type VerifyOcrResult,
+} from './mcp/state';
+import { saveCaptureToDownloads } from './saveCapture';
 
 /**
  * Build output directory structure:
@@ -20,6 +31,11 @@ let mcpServer: PhonePilotMcpServer | null = null;
 
 /** Pending frame capture resolve function */
 let pendingFrameResolve: ((frame: string | null) => void) | null = null;
+
+/** Pending OCR-input capture resolve function */
+let pendingPreOcrResolve: ((payload: string | null) => void) | null = null;
+let pendingMnemonicOcrResolve: ((payload: MnemonicOcrResult | null) => void) | null = null;
+let pendingVerifyOcrResolve: ((payload: VerifyOcrResult | null) => void) | null = null;
 
 /** Use bracket notation to avoid vite:define plugin transformation */
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
@@ -128,6 +144,78 @@ async function captureFrameFromRenderer(): Promise<string | null> {
 }
 
 /**
+ * Requests the OCR-input image from the renderer (crop + scale).
+ * Returns data URL or base64 of the image sent to the OCR library, or null.
+ */
+async function getPreOcrImageFromRenderer(): Promise<string | null> {
+  if (!mainWindow) {
+    console.warn('Cannot capture OCR-input image: mainWindow is null');
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingPreOcrResolve = null;
+      resolve(null);
+    }, 5000);
+
+    pendingPreOcrResolve = (payload: string | null) => {
+      clearTimeout(timeout);
+      pendingPreOcrResolve = null;
+      resolve(payload);
+    };
+
+    mainWindow.webContents.send('capture-pre-ocr-request');
+  });
+}
+
+async function runMnemonicOcrFromRenderer(
+  request?: MnemonicOcrRequest
+): Promise<MnemonicOcrResult | null> {
+  if (!mainWindow) {
+    console.warn('Cannot run mnemonic OCR: mainWindow is null');
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingMnemonicOcrResolve = null;
+      resolve(null);
+    }, 45000);
+
+    pendingMnemonicOcrResolve = (payload: MnemonicOcrResult | null) => {
+      clearTimeout(timeout);
+      pendingMnemonicOcrResolve = null;
+      resolve(payload);
+    };
+
+    mainWindow.webContents.send('mcp-ocr-request', request || null);
+  });
+}
+
+async function runVerifyOcrFromRenderer(): Promise<VerifyOcrResult | null> {
+  if (!mainWindow) {
+    console.warn('Cannot run verify OCR: mainWindow is null');
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingVerifyOcrResolve = null;
+      resolve(null);
+    }, 45000);
+
+    pendingVerifyOcrResolve = (payload: VerifyOcrResult | null) => {
+      clearTimeout(timeout);
+      pendingVerifyOcrResolve = null;
+      resolve(payload);
+    };
+
+    mainWindow.webContents.send('mcp-verify-ocr-request');
+  });
+}
+
+/**
  * Sends MCP log to renderer process.
  */
 function sendMcpLogToRenderer(log: {
@@ -146,6 +234,9 @@ function sendMcpLogToRenderer(log: {
 async function startMcpServer(): Promise<void> {
   // Set up frame capture callback
   setFrameCaptureCallback(captureFrameFromRenderer);
+  setPreOcrCaptureCallback(getPreOcrImageFromRenderer);
+  setMnemonicOcrCallback(runMnemonicOcrFromRenderer);
+  setVerifyOcrCallback(runVerifyOcrFromRenderer);
 
   // Set up MCP log callback to forward logs to renderer
   setMcpLogCallback(sendMcpLogToRenderer);
@@ -185,6 +276,7 @@ app.whenReady().then(async () => {
 
 /** Quit when all windows are closed, except on macOS */
 app.on('window-all-closed', () => {
+  stopPaddleOcrEnDaemon();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -196,6 +288,7 @@ app.on('will-quit', () => {
     mcpServer.stop();
     mcpServer = null;
   }
+  stopPaddleOcrEnDaemon();
 });
 
 /** IPC handler: Returns app version */
@@ -263,6 +356,29 @@ ipcMain.handle('sync-arm-state', async (_event, state: {
   console.log(`[sync-arm-state] Updated MCP armState:`, state);
 });
 
+ipcMain.handle(
+  'save-capture-to-downloads',
+  async (
+    _event,
+    { dataUrlOrBase64, hint }: { dataUrlOrBase64: string; hint: string }
+  ) => saveCaptureToDownloads(dataUrlOrBase64, hint)
+);
+
+/**
+ * IPC handler: Runs en_PP-OCRv5_mobile_rec inference in a Python subprocess.
+ */
+ipcMain.handle(
+  'paddleocr-en-recognize',
+  async (
+    _event,
+    payload: {
+      imageDataUrl: string;
+      layoutHint?: 'mnemonic' | 'verify-options' | 'verify-number' | 'generic';
+      expectedWordCount?: number;
+    }
+  ) => runPaddleOcrEn(payload)
+);
+
 /**
  * IPC listener: Receives captured frame from renderer process.
  * Called in response to 'mcp-capture-frame-request'.
@@ -270,5 +386,23 @@ ipcMain.handle('sync-arm-state', async (_event, state: {
 ipcMain.on('mcp-capture-frame-response', (_event, frame: string | null) => {
   if (pendingFrameResolve) {
     pendingFrameResolve(frame);
+  }
+});
+
+ipcMain.on('capture-pre-ocr-response', (_event, payload: string | null) => {
+  if (pendingPreOcrResolve) {
+    pendingPreOcrResolve(payload);
+  }
+});
+
+ipcMain.on('mcp-ocr-response', (_event, payload: MnemonicOcrResult | null) => {
+  if (pendingMnemonicOcrResolve) {
+    pendingMnemonicOcrResolve(payload);
+  }
+});
+
+ipcMain.on('mcp-verify-ocr-response', (_event, payload: VerifyOcrResult | null) => {
+  if (pendingVerifyOcrResolve) {
+    pendingVerifyOcrResolve(payload);
   }
 });

@@ -9,6 +9,17 @@
  */
 
 /** Represents a single step in the auto operation sequence */
+export interface OcrCaptureOptions {
+  /** Expected mnemonic word count for this capture (12/18/24). */
+  expectedWordCount?: number;
+  /** Merge this capture with already stored mnemonic words by index. */
+  mergeWithStored?: boolean;
+  /** Allow partial OCR result (used by first page of 24-word capture). */
+  allowPartial?: boolean;
+  /** Whether checksum validation is required for this capture to be treated as success. */
+  requireBip39?: boolean;
+}
+
 export interface AutoStep {
   label: string;
   x: number;
@@ -20,8 +31,8 @@ export interface AutoStep {
   swipeTo?: { x: number; y: number };
   /** Delay in ms before raising stylus after swipe (default: 50ms) */
   swipeHoldDelay?: number;
-  /** If true, moves arm to position without clicking, then triggers OCR capture */
-  ocrCapture?: boolean;
+  /** If set, moves arm to position without clicking, then triggers OCR capture. */
+  ocrCapture?: boolean | OcrCaptureOptions;
   /** If set, performs verification OCR and clicks the correct option */
   ocrVerify?: {
     options: { x: number; y: number; depth: number }[];
@@ -398,11 +409,124 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     ],
   },
   {
-    id: 'create-screenshot',
-    name: '截图识别',
+    id: 'create-select-18-words',
+    name: '创建钱包选择18词',
     group: '创建钱包',
     steps: [
-      { label: '移动到截图位置', x: 85, y: 0, depth: 12, ocrCapture: true, delayAfter: 2000 },
+      { label: '展开助记词位数', x: 55, y: 25, depth: 12, delayAfter: 600 },
+      { label: '选择18词', x: 40, y: 55, depth: 12, delayAfter: 800 },
+    ],
+  },
+  {
+    id: 'create-select-24-words',
+    name: '创建钱包选择24词',
+    group: '创建钱包',
+    steps: [
+      { label: '展开助记词位数', x: 55, y: 25, depth: 12, delayAfter: 600 },
+      { label: '选择24词', x: 40, y: 65, depth: 12, delayAfter: 800 },
+    ],
+  },
+  {
+    id: 'create-mnemonic-scroll-10',
+    name: '助记词页上滑10',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '助记词页上滑10',
+        x: 50,
+        y: 78,
+        depth: 12,
+        swipeTo: { x: 50, y: 68 },
+        swipeHoldDelay: 120,
+        delayAfter: 1200,
+      },
+    ],
+  },
+  {
+    id: 'create-mnemonic-scroll-20',
+    name: '助记词页上滑20',
+    group: '创建钱包',
+    steps: [
+      {
+        // Calibrated single swipe to keep overlap between page1 and page2 (covers words 13-15).
+        label: '助记词页上滑20',
+        x: 50,
+        y: 78,
+        depth: 12,
+        swipeTo: { x: 50, y: 50 },
+        swipeHoldDelay: 190,
+        delayAfter: 1400,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-12',
+    name: '截图识别(12词)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: { expectedWordCount: 12, requireBip39: true },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-18',
+    name: '截图识别(18词)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: { expectedWordCount: 18, requireBip39: true },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-24-part1',
+    name: '截图识别(24词-第一页)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置(24词-1)',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: {
+          expectedWordCount: 24,
+          mergeWithStored: true,
+          allowPartial: true,
+          requireBip39: false,
+        },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-24-part2',
+    name: '截图识别(24词-第二页)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置(24词-2)',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: {
+          expectedWordCount: 24,
+          mergeWithStored: true,
+          allowPartial: false,
+          requireBip39: true,
+        },
+        delayAfter: 2000,
+      },
     ],
   },
   {
@@ -431,6 +555,18 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
         },
         delayAfter: 2000,
       },
+    ],
+  },
+  {
+    id: 'create-final-continue-and-reset',
+    name: '确认后继续并复位',
+    group: '创建钱包',
+    steps: [
+      { label: '点击继续1', x: 45, y: 85, depth: 12, delayAfter: 600 },
+      { label: '点击继续2', x: 45, y: 85, depth: 12, delayAfter: 600 },
+      { label: '点击继续3', x: 45, y: 85, depth: 12, delayAfter: 600 },
+      { label: '点击继续4', x: 45, y: 85, depth: 12, delayAfter: 800 },
+      { label: '复位', x: 0, y: 0, depth: 12 },
     ],
   },
 
@@ -575,7 +711,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: 'Click 1', x: 50, y: 85, depth: 12 },
       { label: 'Click 2', x: 50, y: 85, depth: 12 },
       // Settings navigation
-      { label: 'Setting 1', x: 25, y: 40, depth: 12 },
+      { label: 'Setting 1', x: 25, y: 44, depth: 12 },
       { label: 'Setting 2', x: 25, y: 55, depth: 12 },
       // Swipe left to right, hold before release
       { label: 'Swipe right', x: 20, y: 75, depth: 12, swipeTo: { x: 60, y: 75 }, swipeHoldDelay: 500, delayAfter: 5000 },
@@ -617,6 +753,40 @@ const IMPORT_PREFIX: string[] = [
 const CREATE_PREFIX: string[] = [
   'lang-zh', 'pin-1111', 'nav-continue-setup', 'nav-create',
 ];
+/** Create 18/24 wallet prefix: already on create page, do not click "创建新钱包". */
+const CREATE_PREFIX_DIRECT_EXPAND: string[] = [
+  'lang-zh', 'pin-1111', 'nav-continue-setup',
+];
+const CREATE_FLOW_SUFFIX: string[] = [
+  'create-backup-confirm',
+  'create-screenshot-12',
+  'create-continue',
+  'create-verify-word',
+  'create-verify-word',
+  'create-verify-word',
+  'create-final-continue-and-reset',
+];
+const CREATE_FLOW_SUFFIX_18: string[] = [
+  'create-backup-confirm',
+  'create-mnemonic-scroll-10',
+  'create-screenshot-18',
+  'create-continue',
+  'create-verify-word',
+  'create-verify-word',
+  'create-verify-word',
+  'create-final-continue-and-reset',
+];
+const CREATE_FLOW_SUFFIX_24: string[] = [
+  'create-backup-confirm',
+  'create-screenshot-24-part1',
+  'create-mnemonic-scroll-20',
+  'create-screenshot-24-part2',
+  'create-continue',
+  'create-verify-word',
+  'create-verify-word',
+  'create-verify-word',
+  'create-final-continue-and-reset',
+];
 
 const ALL_SEQUENCES: AutoSequence[] = [
   // ============================================================================
@@ -634,9 +804,21 @@ const ALL_SEQUENCES: AutoSequence[] = [
   // ============================================================================
   {
     id: 'create-wallet',
-    name: '创建新钱包',
+    name: '创建新钱包(12词)',
     category: '创建钱包',
-    actions: [...CREATE_PREFIX, 'create-backup-confirm', 'create-screenshot', 'create-continue', 'create-verify-word', 'create-verify-word', 'create-verify-word'],
+    actions: [...CREATE_PREFIX, ...CREATE_FLOW_SUFFIX],
+  },
+  {
+    id: 'create-wallet-18',
+    name: '创建新钱包(18词)',
+    category: '创建钱包',
+    actions: [...CREATE_PREFIX_DIRECT_EXPAND, 'create-select-18-words', ...CREATE_FLOW_SUFFIX_18],
+  },
+  {
+    id: 'create-wallet-24',
+    name: '创建新钱包(24词)',
+    category: '创建钱包',
+    actions: [...CREATE_PREFIX_DIRECT_EXPAND, 'create-select-24-words', ...CREATE_FLOW_SUFFIX_24],
   },
 
   // ============================================================================
