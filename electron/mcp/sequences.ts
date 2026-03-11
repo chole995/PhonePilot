@@ -10,7 +10,7 @@
 
 /** Represents a single step in the auto operation sequence */
 export interface OcrCaptureOptions {
-  /** Expected mnemonic word count for this capture (12/18/24). */
+  /** Expected mnemonic word count for this capture (12/18/20/24). */
   expectedWordCount?: number;
   /** Merge this capture with already stored mnemonic words by index. */
   mergeWithStored?: boolean;
@@ -25,10 +25,16 @@ export interface AutoStep {
   x: number;
   y: number;
   depth: number;
+  /** Optional delay in ms before this step executes. */
+  delayBefore?: number;
   /** Optional delay in ms after this step (default: 200ms) */
   delayAfter?: number;
   /** If set, performs a swipe from (x,y) to swipeTo coordinates instead of a click */
   swipeTo?: { x: number; y: number };
+  /** Optional segmented swipe count (>=1). Higher value means slower movement on screen. */
+  swipeSegments?: number;
+  /** Delay in ms between segmented swipe points (default: 0ms). */
+  swipeSegmentDelay?: number;
   /** Delay in ms before raising stylus after swipe (default: 50ms) */
   swipeHoldDelay?: number;
   /** If set, moves arm to position without clicking, then triggers OCR capture. */
@@ -52,6 +58,8 @@ export interface PageAction {
   group: string;
   /** Steps that make up this action */
   steps: AutoStep[];
+  /** Optional dynamic step builder evaluated when the sequence runs. */
+  buildSteps?: () => AutoStep[];
 }
 
 // ============================================================================
@@ -60,11 +68,11 @@ export interface PageAction {
 
 /** Keyboard letter coordinates */
 export const LETTER_COORDS: Record<string, { x: number; y: number }> = {
-  q: { x: 19, y: 74 }, w: { x: 24, y: 74 }, e: { x: 28, y: 74 }, r: { x: 33, y: 74 },
+  q: { x: 17, y: 73 }, w: { x: 24, y: 74 }, e: { x: 28, y: 74 }, r: { x: 33, y: 74 },
   t: { x: 37, y: 74 }, y: { x: 41, y: 74 }, u: { x: 45, y: 74 }, i: { x: 50, y: 74 },
   o: { x: 55, y: 74 }, p: { x: 59, y: 74 },
-  a: { x: 19, y: 80 }, s: { x: 24, y: 80 }, d: { x: 29, y: 80 }, f: { x: 34, y: 80 },
-  g: { x: 39, y: 80 }, h: { x: 44, y: 80 }, j: { x: 49, y: 80 }, k: { x: 54, y: 80 },
+  a: { x: 19, y: 80 }, s: { x: 25, y: 80 }, d: { x: 29, y: 80 }, f: { x: 34, y: 80 },
+  g: { x: 39, y: 80 }, h: { x: 43, y: 80 }, j: { x: 49, y: 80 }, k: { x: 54, y: 80 },
   l: { x: 59, y: 80 },
   z: { x: 25, y: 88 }, x: { x: 30, y: 88 }, c: { x: 35, y: 88 }, v: { x: 39, y: 88 },
   b: { x: 44, y: 88 }, n: { x: 49, y: 88 }, m: { x: 54, y: 88 },
@@ -104,10 +112,10 @@ export const DEVICE_BUTTONS = {
 // Helper functions
 // ============================================================================
 
-/** Delay (ms) after each letter tap when typing mnemonic words. Reduce to speed up. */
-export const STEP_DELAY_AFTER_LETTER_MS = 350;
-/** Delay (ms) after each word confirm tap. Reduce to speed up. */
-export const STEP_DELAY_AFTER_CONFIRM_MS = 600;
+/** Delay (ms) after each letter tap when typing mnemonic words. */
+export const STEP_DELAY_AFTER_LETTER_MS = 700;
+/** Delay (ms) after each word confirm tap to leave a small gap before the next word. */
+export const STEP_DELAY_AFTER_CONFIRM_MS = 700;
 
 /**
  * Generates AutoStep array from a list of words.
@@ -130,7 +138,6 @@ export function generateWordSteps(words: string[]): AutoStep[] {
         });
       }
     }
-    // Add confirm step after each word
     steps.push({
       label: `W${wordIndex + 1}:confirm`,
       x: CONFIRM_COORD.x,
@@ -139,6 +146,69 @@ export function generateWordSteps(words: string[]): AutoStep[] {
       delayAfter: STEP_DELAY_AFTER_CONFIRM_MS,
     });
   });
+  return steps;
+}
+
+function pickRandomShares(shares: string[][], count: number): string[][] {
+  const pool = [...shares];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, Math.max(0, Math.min(count, pool.length)));
+}
+
+export function generateSlip39ShareSteps(shares: string[][]): AutoStep[] {
+  const steps: AutoStep[] = [];
+  let globalWordIndex = 0;
+
+  shares.forEach((shareWords, shareIndex) => {
+    shareWords.forEach((word, wordInShareIndex) => {
+      globalWordIndex += 1;
+      const lowerWord = word.toLowerCase();
+      for (let i = 0; i < lowerWord.length; i++) {
+        const letter = lowerWord[i];
+        const coord = LETTER_COORDS[letter];
+        if (coord) {
+          steps.push({
+            label: `W${globalWordIndex}:${letter}`,
+            x: coord.x,
+            y: coord.y,
+            depth: 12,
+            delayBefore: shareIndex > 0 && wordInShareIndex === 0 && i === 0 ? 3000 : undefined,
+            delayAfter: STEP_DELAY_AFTER_LETTER_MS,
+          });
+        }
+      }
+      steps.push({
+        label: `W${globalWordIndex}:confirm`,
+        x: CONFIRM_COORD.x,
+        y: CONFIRM_COORD.y,
+        depth: 12,
+        delayAfter: STEP_DELAY_AFTER_CONFIRM_MS,
+      });
+    });
+
+    if (shareIndex < shares.length - 1) {
+      steps.push({
+        label: `Share${shareIndex + 1}:confirm`,
+        x: DEVICE_BUTTONS.confirm.x,
+        y: DEVICE_BUTTONS.confirm.y,
+        depth: 12,
+        delayBefore: 5000,
+        delayAfter: 3000,
+      });
+      steps.push({
+        label: `Share${shareIndex + 1}:start-next`,
+        x: DEVICE_BUTTONS.confirm.x,
+        y: DEVICE_BUTTONS.confirm.y,
+        depth: 12,
+        delayBefore: 1500,
+        delayAfter: 5000,
+      });
+    }
+  });
+
   return steps;
 }
 
@@ -169,8 +239,6 @@ const SLIP39_20_1 = 'fake kidney academic academic dwarf orange primary secret m
 const SLIP39_20_2_SHARE1 = 'network vexed academic acid alive forbid database equation average advocate golden careful exhaust dance texture satisfy lair negative earth flash'.split(' ');
 const SLIP39_20_2_SHARE2 = 'network vexed academic agency calcium memory elegant merchant welcome oral evidence bulb union company suitable spend loud miracle story withdraw'.split(' ');
 const SLIP39_20_2_SHARE3 = 'network vexed academic always debut unhappy veteran trust goat cluster easel penalty entrance drift mild uncover short sack excuse kitchen'.split(' ');
-const SLIP39_20_2_ALL = [...SLIP39_20_2_SHARE1, ...SLIP39_20_2_SHARE2, ...SLIP39_20_2_SHARE3];
-
 /** slip39 20-word (16-16: 16 shares) */
 const SLIP39_20_16_SHARE1 = 'platform helpful academic afraid custody blind shaft burning visual prune knit clay mason genuine march crisis smug wits woman taught'.split(' ');
 const SLIP39_20_16_SHARE2 = 'platform helpful academic alto armed theory alpha paces welcome quick quiet device craft strike chemical ocean briefing space phantom legal'.split(' ');
@@ -188,13 +256,6 @@ const SLIP39_20_16_SHARE13 = 'platform helpful academic deploy chemical afraid j
 const SLIP39_20_16_SHARE14 = 'platform helpful academic diploma cricket trend loud replace rapids payment paces theory easel spine cultural dictate hormone necklace blimp exact'.split(' ');
 const SLIP39_20_16_SHARE15 = 'platform helpful academic dragon company true volume carve dough endorse force plot cinema remember skin transfer criminal hunting axle mayor'.split(' ');
 const SLIP39_20_16_SHARE16 = 'platform helpful academic easel deadline evil museum spill funding muscle retreat smart timely oven transfer grownup deal armed merchant flash'.split(' ');
-const SLIP39_20_16_ALL = [
-  ...SLIP39_20_16_SHARE1, ...SLIP39_20_16_SHARE2, ...SLIP39_20_16_SHARE3, ...SLIP39_20_16_SHARE4,
-  ...SLIP39_20_16_SHARE5, ...SLIP39_20_16_SHARE6, ...SLIP39_20_16_SHARE7, ...SLIP39_20_16_SHARE8,
-  ...SLIP39_20_16_SHARE9, ...SLIP39_20_16_SHARE10, ...SLIP39_20_16_SHARE11, ...SLIP39_20_16_SHARE12,
-  ...SLIP39_20_16_SHARE13, ...SLIP39_20_16_SHARE14, ...SLIP39_20_16_SHARE15, ...SLIP39_20_16_SHARE16,
-];
-
 /** slip39 33-word (1 share) */
 const SLIP39_33_1 = 'station industry academic academic aunt similar picture filter chubby vintage insect hairy charity priority ugly mandate credit faint segment mobile cage junior receiver reject crazy sympathy extra helpful expand force counter lamp rescue'.split(' ');
 
@@ -202,8 +263,6 @@ const SLIP39_33_1 = 'station industry academic academic aunt similar picture fil
 const SLIP39_33_2_SHARE1 = 'yoga racism academic acid average silent year kind package pitch bracelet desert aide guilt render belong density forbid spark benefit trend junior fake dough silver spray adequate western liberty hearing strike prepare various'.split(' ');
 const SLIP39_33_2_SHARE2 = 'yoga racism academic agency antenna aircraft nervous biology buyer invasion satoshi angry darkness skin guilt market fatal violence item platform painting width involve marathon parking duration pancake wildlife should execute silver metric oven'.split(' ');
 const SLIP39_33_2_SHARE3 = 'yoga racism academic always album fitness demand priority negative both percent ceramic vegan pickup ajar cricket ecology engage owner glance sunlight replace canyon drink rocky living fridge move adjust phrase fatigue counter erode'.split(' ');
-const SLIP39_33_2_ALL = [...SLIP39_33_2_SHARE1, ...SLIP39_33_2_SHARE2, ...SLIP39_33_2_SHARE3];
-
 /** 12 words "all" input steps (legacy test) */
 const WORDS_12_STEPS: AutoStep[] = [
   // Word 1: "all"
@@ -300,7 +359,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: '再次确认PIN码2', x: 25, y: 50, depth: 12 },
       { label: '再次确认PIN码3', x: 25, y: 50, depth: 12 },
       { label: '再次确认PIN码4', x: 25, y: 50, depth: 12 },
-      { label: '点击确认', x: 55, y: 85, depth: 12 },
+      { label: '点击确认', x: 55, y: 85, depth: 12, delayAfter: 900 },
     ],
   },
   {
@@ -427,6 +486,14 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     ],
   },
   {
+    id: 'create-expand-word-options',
+    name: '创建钱包展开助记词选项',
+    group: '创建钱包',
+    steps: [
+      { label: '展开助记词位数', x: 56, y: 23, depth: 12, delayAfter: 600 },
+    ],
+  },
+  {
     id: 'create-mnemonic-scroll-10',
     name: '助记词页上滑10',
     group: '创建钱包',
@@ -439,6 +506,42 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
         swipeTo: { x: 50, y: 68 },
         swipeHoldDelay: 120,
         delayAfter: 1200,
+      },
+    ],
+  },
+  {
+    id: 'create-mnemonic-scroll-15',
+    name: '助记词页上滑15',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '助记词页上滑15',
+        x: 50,
+        y: 78,
+        depth: 12,
+        swipeTo: { x: 50, y: 63 },
+        swipeSegments: 5,
+        swipeSegmentDelay: 45,
+        swipeHoldDelay: 220,
+        delayAfter: 1400,
+      },
+    ],
+  },
+  {
+    id: 'create-slip39-mnemonic-scroll-15-slow',
+    name: 'SLIP39助记词页上滑15(慢速)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: 'SLIP39助记词页上滑15(慢速)',
+        x: 50,
+        y: 78,
+        depth: 12,
+        swipeTo: { x: 50, y: 63 },
+        swipeSegments: 8,
+        swipeSegmentDelay: 80,
+        swipeHoldDelay: 300,
+        delayAfter: 1700,
       },
     ],
   },
@@ -457,6 +560,102 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
         swipeHoldDelay: 190,
         delayAfter: 1400,
       },
+    ],
+  },
+  {
+    id: 'create-mnemonic-scroll-40',
+    name: '助记词页上滑40',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '助记词页上滑40',
+        x: 50,
+        y: 78,
+        depth: 12,
+        swipeTo: { x: 50, y: 38 },
+        swipeHoldDelay: 240,
+        delayAfter: 1500,
+      },
+    ],
+  },
+  {
+    id: 'create-slip39-scroll-large',
+    name: 'SLIP39配置页大幅上滑',
+    group: '创建钱包',
+    steps: [
+      {
+        label: 'SLIP39配置页大幅上滑',
+        x: 50,
+        y: 82,
+        depth: 12,
+        swipeTo: { x: 50, y: 38 },
+        swipeHoldDelay: 240,
+        delayAfter: 1400,
+      },
+    ],
+  },
+  {
+    id: 'create-slip39-select-single',
+    name: '创建SLIP39选择单份',
+    group: '创建钱包',
+    steps: [
+      { label: '选择单份助记词', x: 30, y: 45, depth: 12, delayAfter: 900 },
+    ],
+  },
+  {
+    id: 'create-slip39-select-multi',
+    name: '创建SLIP39选择多份',
+    group: '创建钱包',
+    steps: [
+      { label: '选择多份助记词', x: 30, y: 55, depth: 12, delayAfter: 900 },
+    ],
+  },
+  {
+    id: 'create-slip39-shares-2',
+    name: 'SLIP39份额选择2',
+    group: '创建钱包',
+    steps: [
+      { label: '选择2份额', x: 20, y: 35, depth: 12, delayAfter: 700 },
+    ],
+  },
+  {
+    id: 'create-slip39-shares-8',
+    name: 'SLIP39份额选择8',
+    group: '创建钱包',
+    steps: [
+      { label: '选择8份额', x: 29, y: 44, depth: 12, delayAfter: 700 },
+    ],
+  },
+  {
+    id: 'create-slip39-shares-16',
+    name: 'SLIP39份额选择16',
+    group: '创建钱包',
+    steps: [
+      { label: '选择16份额', x: 55, y: 53, depth: 12, delayAfter: 700 },
+    ],
+  },
+  {
+    id: 'create-slip39-threshold-2',
+    name: 'SLIP39阈值选择2',
+    group: '创建钱包',
+    steps: [
+      { label: '选择2阈值', x: 20, y: 68, depth: 12, delayAfter: 700 },
+    ],
+  },
+  {
+    id: 'create-slip39-threshold-8',
+    name: 'SLIP39阈值选择8',
+    group: '创建钱包',
+    steps: [
+      { label: '选择8阈值', x: 29, y: 77, depth: 12, delayAfter: 700 },
+    ],
+  },
+  {
+    id: 'create-slip39-config-continue',
+    name: 'SLIP39配置确认继续',
+    group: '创建钱包',
+    steps: [
+      { label: '确认配置并继续', x: 55, y: 85, depth: 12, delayAfter: 900 },
     ],
   },
   {
@@ -485,6 +684,61 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
         y: 0,
         depth: 12,
         ocrCapture: { expectedWordCount: 18, requireBip39: true },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-20',
+    name: '截图识别(20词)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: { expectedWordCount: 20, requireBip39: false },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-20-part1',
+    name: '截图识别(20词-第一页)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置(20词-1)',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: {
+          expectedWordCount: 20,
+          mergeWithStored: true,
+          allowPartial: true,
+          requireBip39: false,
+        },
+        delayAfter: 2000,
+      },
+    ],
+  },
+  {
+    id: 'create-screenshot-20-part2',
+    name: '截图识别(20词-第二页)',
+    group: '创建钱包',
+    steps: [
+      {
+        label: '移动到截图位置(20词-2)',
+        x: 85,
+        y: 0,
+        depth: 12,
+        ocrCapture: {
+          expectedWordCount: 20,
+          mergeWithStored: true,
+          allowPartial: false,
+          requireBip39: false,
+        },
         delayAfter: 2000,
       },
     ],
@@ -569,6 +823,22 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: '复位', x: 0, y: 0, depth: 12 },
     ],
   },
+  {
+    id: 'create-slip39-share-confirm',
+    name: 'SLIP39当前份额确认',
+    group: '创建钱包',
+    steps: [
+      { label: '点击确认', x: 45, y: 85, depth: 12, delayBefore: 2000, delayAfter: 2000 },
+    ],
+  },
+  {
+    id: 'create-reset-only',
+    name: '仅复位',
+    group: '创建钱包',
+    steps: [
+      { label: '复位', x: 0, y: 0, depth: 12 },
+    ],
+  },
 
 
   // --------------------------------------------------------------------------
@@ -650,13 +920,21 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     id: 'input-slip39-20-2-all',
     name: 'slip39-20词-2/3 输入',
     group: '助记词输入',
-    steps: generateWordSteps(SLIP39_20_2_ALL),
+    steps: [],
+    buildSteps: () => generateSlip39ShareSteps(
+      pickRandomShares([SLIP39_20_2_SHARE1, SLIP39_20_2_SHARE2, SLIP39_20_2_SHARE3], 2)
+    ),
   },
   {
     id: 'input-slip39-20-16-all',
     name: 'slip39-20词-16/16 输入',
     group: '助记词输入',
-    steps: generateWordSteps(SLIP39_20_16_ALL),
+    steps: generateSlip39ShareSteps([
+      SLIP39_20_16_SHARE1, SLIP39_20_16_SHARE2, SLIP39_20_16_SHARE3, SLIP39_20_16_SHARE4,
+      SLIP39_20_16_SHARE5, SLIP39_20_16_SHARE6, SLIP39_20_16_SHARE7, SLIP39_20_16_SHARE8,
+      SLIP39_20_16_SHARE9, SLIP39_20_16_SHARE10, SLIP39_20_16_SHARE11, SLIP39_20_16_SHARE12,
+      SLIP39_20_16_SHARE13, SLIP39_20_16_SHARE14, SLIP39_20_16_SHARE15, SLIP39_20_16_SHARE16,
+    ]),
   },
   {
     id: 'input-slip39-33-1',
@@ -668,7 +946,10 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     id: 'input-slip39-33-2-all',
     name: 'slip39-33词-3/2 输入',
     group: '助记词输入',
-    steps: generateWordSteps(SLIP39_33_2_ALL),
+    steps: [],
+    buildSteps: () => generateSlip39ShareSteps(
+      pickRandomShares([SLIP39_33_2_SHARE1, SLIP39_33_2_SHARE2, SLIP39_33_2_SHARE3], 2)
+    ),
   },
 
   // --------------------------------------------------------------------------
@@ -711,10 +992,20 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: 'Click 1', x: 50, y: 85, depth: 12 },
       { label: 'Click 2', x: 50, y: 85, depth: 12 },
       // Settings navigation
-      { label: 'Setting 1', x: 25, y: 44, depth: 12 },
-      { label: 'Setting 2', x: 25, y: 55, depth: 12 },
+      { label: 'Setting 1', x: 25, y: 44, depth: 12, delayAfter: 600 },
+      { label: 'Setting 2', x: 25, y: 55, depth: 12, delayAfter: 900 },
       // Swipe left to right, hold before release
-      { label: 'Swipe right', x: 20, y: 75, depth: 12, swipeTo: { x: 60, y: 75 }, swipeHoldDelay: 500, delayAfter: 5000 },
+      {
+        label: 'Swipe right',
+        x: 20,
+        y: 75,
+        depth: 12,
+        swipeTo: { x: 60, y: 75 },
+        swipeSegments: 6,
+        swipeSegmentDelay: 70,
+        swipeHoldDelay: 900,
+        delayAfter: 7000,
+      },
       // Final confirmation with wait
       { label: 'Confirm', x: 25, y: 85, depth: 12, delayAfter: 10000 },
       // Reset to origin
@@ -787,6 +1078,28 @@ const CREATE_FLOW_SUFFIX_24: string[] = [
   'create-verify-word',
   'create-final-continue-and-reset',
 ];
+const CREATE_FLOW_SUFFIX_SLIP39_TEMPLATE: string[] = [
+  'create-backup-confirm',
+];
+const CREATE_FLOW_SUFFIX_SLIP39_PER_SHARE: string[] = [
+  'create-screenshot-20-part1',
+  'create-slip39-mnemonic-scroll-15-slow',
+  'create-screenshot-20-part2',
+  'create-continue',
+  'create-verify-word',
+  'create-verify-word',
+  'create-verify-word',
+  'create-slip39-share-confirm',
+];
+
+function buildSlip39PerShareActions(shareCount: number): string[] {
+  const loops = Math.max(1, Math.floor(shareCount));
+  const actions: string[] = [];
+  for (let i = 0; i < loops; i++) {
+    actions.push(...CREATE_FLOW_SUFFIX_SLIP39_PER_SHARE);
+  }
+  return actions;
+}
 
 const ALL_SEQUENCES: AutoSequence[] = [
   // ============================================================================
@@ -819,6 +1132,71 @@ const ALL_SEQUENCES: AutoSequence[] = [
     name: '创建新钱包(24词)',
     category: '创建钱包',
     actions: [...CREATE_PREFIX_DIRECT_EXPAND, 'create-select-24-words', ...CREATE_FLOW_SUFFIX_24],
+  },
+  {
+    id: 'create-slip39-single-template',
+    name: '创建SLIP39(单份模板)',
+    category: '创建钱包',
+    actions: [
+      ...CREATE_PREFIX_DIRECT_EXPAND,
+      'create-expand-word-options',
+      'create-slip39-scroll-large',
+      'create-slip39-select-single',
+      ...CREATE_FLOW_SUFFIX_SLIP39_TEMPLATE,
+      ...buildSlip39PerShareActions(1),
+      'create-final-continue-and-reset',
+    ],
+  },
+  {
+    id: 'create-slip39-multi-2of2-template',
+    name: '创建SLIP39(多份模板 2/2)',
+    category: '创建钱包',
+    actions: [
+      ...CREATE_PREFIX_DIRECT_EXPAND,
+      'create-expand-word-options',
+      'create-slip39-scroll-large',
+      'create-slip39-select-multi',
+      'create-slip39-shares-2',
+      'create-slip39-threshold-2',
+      'create-slip39-config-continue',
+      ...CREATE_FLOW_SUFFIX_SLIP39_TEMPLATE,
+      ...buildSlip39PerShareActions(2),
+      'create-final-continue-and-reset',
+    ],
+  },
+  {
+    id: 'create-slip39-multi-8of8-template',
+    name: '创建SLIP39(多份模板 8/8)',
+    category: '创建钱包',
+    actions: [
+      ...CREATE_PREFIX_DIRECT_EXPAND,
+      'create-expand-word-options',
+      'create-slip39-scroll-large',
+      'create-slip39-select-multi',
+      'create-slip39-shares-8',
+      'create-slip39-threshold-8',
+      'create-slip39-config-continue',
+      ...CREATE_FLOW_SUFFIX_SLIP39_TEMPLATE,
+      ...buildSlip39PerShareActions(8),
+      'create-final-continue-and-reset',
+    ],
+  },
+  {
+    id: 'create-slip39-multi-16of2-template',
+    name: '创建SLIP39(多份模板 16/2)',
+    category: '创建钱包',
+    actions: [
+      ...CREATE_PREFIX_DIRECT_EXPAND,
+      'create-expand-word-options',
+      'create-slip39-scroll-large',
+      'create-slip39-select-multi',
+      'create-slip39-shares-16',
+      'create-slip39-threshold-2',
+      'create-slip39-config-continue',
+      ...CREATE_FLOW_SUFFIX_SLIP39_TEMPLATE,
+      ...buildSlip39PerShareActions(16),
+      'create-final-continue-and-reset',
+    ],
   },
 
   // ============================================================================
@@ -1027,7 +1405,7 @@ export function getFullSteps(sequence: AutoSequence): AutoStep[] {
   for (const actionId of sequence.actions) {
     const action = PAGE_ACTION_MAP.get(actionId);
     if (action) {
-      steps.push(...action.steps);
+      steps.push(...(action.buildSteps ? action.buildSteps() : action.steps));
     } else {
       console.warn(`[sequences] Unknown page action ID: ${actionId}`);
     }

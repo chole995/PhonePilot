@@ -595,12 +595,13 @@ function extractVerifyOptionWords(text: string, maxOptions: number = 3): string[
  */
 function mapOptionToMnemonicStrict(ocrWord: string, mnemonicWords: string[]): string | null {
   if (mnemonicWords.includes(ocrWord)) return ocrWord;
+  const uniqueMnemonicWords = Array.from(new Set(mnemonicWords));
 
   let bestWord: string | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   let bestCount = 0;
 
-  for (const mnemonicWord of mnemonicWords) {
+  for (const mnemonicWord of uniqueMnemonicWords) {
     const distance = levenshteinDistance(ocrWord, mnemonicWord);
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -965,6 +966,66 @@ function CameraPanel() {
       imageDataUrl: string;
       preOcrImageDataUrl: string;
     } | null = null;
+    type NumberCandidate = {
+      number: number;
+      rawText: string;
+      confidence: number;
+      imageDataUrl: string;
+      preOcrImageDataUrl: string;
+      score: number;
+    };
+    const detectedCandidates: NumberCandidate[] = [];
+
+    const scoreNumberCandidate = (rawText: string, number: number, confidence: number): number => {
+      let score = confidence;
+      const normalized = rawText.toLowerCase();
+      if (new RegExp(`[#＃]\\s*${number}\\b`, 'i').test(normalized)) {
+        score += 28;
+      }
+      if (new RegExp(`\\b(word|单词)\\s*[#＃]?\\s*${number}\\b`, 'i').test(normalized)) {
+        score += 18;
+      }
+      if (normalized.includes(`\n${number}\n`) || normalized.trim().endsWith(` ${number}`)) {
+        score += 6;
+      }
+      return score;
+    };
+
+    const pickBestCandidate = (candidates: NumberCandidate[]): NumberCandidate | null => {
+      if (candidates.length === 0) return null;
+      const grouped = new Map<number, {
+        totalScore: number;
+        count: number;
+        best: NumberCandidate;
+      }>();
+      for (const candidate of candidates) {
+        const current = grouped.get(candidate.number);
+        if (!current) {
+          grouped.set(candidate.number, {
+            totalScore: candidate.score,
+            count: 1,
+            best: candidate,
+          });
+          continue;
+        }
+        current.totalScore += candidate.score;
+        current.count += 1;
+        if (
+          candidate.score > current.best.score
+          || (candidate.score === current.best.score && candidate.confidence > current.best.confidence)
+        ) {
+          current.best = candidate;
+        }
+      }
+
+      const ranked = Array.from(grouped.values()).sort((a, b) => {
+        if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+        if (b.count !== a.count) return b.count - a.count;
+        if (b.best.score !== a.best.score) return b.best.score - a.best.score;
+        return a.best.number - b.best.number;
+      });
+      return ranked[0]?.best ?? null;
+    };
 
     for (const scene of fallbackScenes) {
       const result = await runOcrOnRegion(scene, {
@@ -994,18 +1055,31 @@ function CameraPanel() {
       );
 
       if (detectedNumber !== -1) {
-        return {
+        detectedCandidates.push({
           number: detectedNumber,
           rawText,
           confidence,
           imageDataUrl: result.imageDataUrl,
           preOcrImageDataUrl: result.preOcrImageDataUrl,
-        };
+          score: scoreNumberCandidate(rawText, detectedNumber, confidence),
+        });
       }
+    }
+
+    const bestDetected = pickBestCandidate(detectedCandidates);
+    if (bestDetected) {
+      return {
+        number: bestDetected.number,
+        rawText: bestDetected.rawText,
+        confidence: bestDetected.confidence,
+        imageDataUrl: bestDetected.imageDataUrl,
+        preOcrImageDataUrl: bestDetected.preOcrImageDataUrl,
+      };
     }
 
     if (bestAttempt) {
       // Paddle pass failed to get a valid index; fallback to Tesseract digits-only across ROI variants.
+      const tesseractCandidates: NumberCandidate[] = [];
       for (const scene of fallbackScenes) {
         const tesseractResult = await runOcrOnRegion(scene, {
           onImageForOcr: options?.onImageForOcr,
@@ -1022,14 +1096,30 @@ function CameraPanel() {
           `[CameraPanel] Number OCR tesseract fallback raw: "${tesseractResult.rawText.trim()}", confidence: ${tesseractResult.confidence.toFixed(0)}%, roi=(${scene.roi.x},${scene.roi.y},${scene.roi.width},${scene.roi.height})`
         );
         if (tesseractIndex !== -1) {
-          return {
+          tesseractCandidates.push({
             number: tesseractIndex,
             rawText: tesseractResult.rawText,
             confidence: tesseractResult.confidence,
             imageDataUrl: tesseractResult.imageDataUrl,
             preOcrImageDataUrl: tesseractResult.preOcrImageDataUrl,
-          };
+            score: scoreNumberCandidate(
+              tesseractResult.rawText,
+              tesseractIndex,
+              tesseractResult.confidence
+            ),
+          });
         }
+      }
+
+      const bestTesseract = pickBestCandidate(tesseractCandidates);
+      if (bestTesseract) {
+        return {
+          number: bestTesseract.number,
+          rawText: bestTesseract.rawText,
+          confidence: bestTesseract.confidence,
+          imageDataUrl: bestTesseract.imageDataUrl,
+          preOcrImageDataUrl: bestTesseract.preOcrImageDataUrl,
+        };
       }
 
       return {
@@ -1149,6 +1239,7 @@ function CameraPanel() {
     sceneConfig?: OcrSceneConfig;
     frameCanvas?: HTMLCanvasElement;
     expectedWordCount?: number;
+    applyBip39Wordlist?: boolean;
   }): Promise<{
     mnemonicWords: MnemonicWord[];
     rawText: string;
@@ -1164,6 +1255,7 @@ function CameraPanel() {
       12,
       Math.min(24, Math.floor(options?.expectedWordCount ?? EXPECTED_MNEMONIC_COUNT))
     );
+    const applyBip39Wordlist = options?.applyBip39Wordlist ?? true;
     const sceneCandidates = buildMnemonicSceneCandidates(sceneConfig, expectedWordCount);
 
     // Extract numbered mnemonic words.
@@ -1204,7 +1296,9 @@ function CameraPanel() {
     ) => {
       if (index < 1 || index > expectedWordCount) return;
       const normalizedWord = ocrWord.toLowerCase();
-      const correction = correctToBip39(normalizedWord);
+      const correction = applyBip39Wordlist
+        ? correctToBip39(normalizedWord)
+        : { word: normalizedWord, corrected: false };
       const candidate: MnemonicWord = {
         index,
         word: correction.word,
@@ -1373,10 +1467,11 @@ function CameraPanel() {
             const index = startIndex + shift + rowIdx;
             const existing = indexedWords.get(index);
             if (!existing) return;
-            const corrected = correctToBip39(entry.word).word;
-            if (existing.word === corrected) {
+            const normalized = entry.word.toLowerCase();
+            const expectedWord = applyBip39Wordlist ? correctToBip39(normalized).word : normalized;
+            if (existing.word === expectedWord) {
               score += 2;
-            } else if (levenshteinDistance(existing.word, corrected) <= 1) {
+            } else if (levenshteinDistance(existing.word, expectedWord) <= 1) {
               score += 1;
             }
           });
@@ -1423,7 +1518,7 @@ function CameraPanel() {
 
     // Last-resort fallback for 18/24: if indices are unreadable but OCR text has enough BIP39-like words,
     // map sequentially so the flow can continue and surface concrete words for debugging.
-    if (indexedWords.size === 0 && expectedWordCount >= 18) {
+    if (applyBip39Wordlist && indexedWords.size === 0 && expectedWordCount >= 18) {
       const tokens = (aggregatedRawText.match(/[a-zA-Z]{3,8}/g) || [])
         .map((token) => token.toLowerCase());
       const orderedWords: string[] = [];
@@ -1521,7 +1616,7 @@ function CameraPanel() {
 
     // Validate the full mnemonic against BIP39 checksum
     let bip39Valid = false;
-    if (hasCompleteSequence) {
+    if (hasCompleteSequence && applyBip39Wordlist) {
       const phrase = mnemonicWords.map(w => w.word).join(' ');
       try {
         bip39Valid = validateMnemonic(phrase, bip39English);
@@ -1538,6 +1633,8 @@ function CameraPanel() {
           console.log(`BIP39 auto-correction succeeded!`);
         }
       }
+    } else if (hasCompleteSequence) {
+      console.log('[CameraPanel] Mnemonic OCR complete (non-BIP39 flow), skipped BIP39 validation.');
     } else {
       console.log(
         `[CameraPanel] Mnemonic OCR indices incomplete: [${mnemonicWords.map((w) => w.index).join(', ')}], missing=[${missingIndices.join(', ')}]`
@@ -1607,7 +1704,7 @@ function CameraPanel() {
       } | null = null;
 
       // Try OCR with retries
-      for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
+    for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
         console.log(`OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
 
         const result = await runSingleOcr();
@@ -2131,6 +2228,7 @@ function CameraPanel() {
               }
             },
             expectedWordCount,
+            applyBip39Wordlist: requireBip39,
           });
           if (!result) continue;
 
@@ -2231,7 +2329,7 @@ function CameraPanel() {
           ? effectiveMissingIndices.length === 0
           : bestHasCompleteSequence;
         let finalBip39Valid = bestBip39Valid;
-        if (mergeWithStored && hasFull) {
+        if (mergeWithStored && hasFull && requireBip39) {
           try {
             finalBip39Valid = validateMnemonic(words.join(' '), bip39English);
           } catch {
@@ -2268,7 +2366,7 @@ function CameraPanel() {
           const missingLine = hasFull
             ? ''
             : `\n缺失编号: ${effectiveMissingIndices.join(', ') || '未知'}`;
-          const validationLine = hasFull
+          const validationLine = hasFull && requireBip39
             ? `\nBIP39 checksum: ${finalBip39Valid ? 'valid' : 'INVALID'}${hasCorrections ? ' (有自动修正)' : ''}`
             : '';
 
@@ -2288,7 +2386,7 @@ function CameraPanel() {
               const partialIndices = Array.from(finalWordMap.keys()).sort((a, b) => a - b);
               console.log(`[CameraPanel] Stored partial mnemonic indices: ${partialIndices.join(', ')}`);
             }
-          } else if (hasFull && finalBip39Valid) {
+          } else if (hasFull && (!requireBip39 || finalBip39Valid)) {
             const sparseConfidences = Array.from(
               { length: expectedWordCount },
               (_, idx) => finalConfidenceByIndex.get(idx + 1) ?? 0
@@ -2386,10 +2484,18 @@ function CameraPanel() {
         let verifyNumberSaved = false;
         let verifyOptionsSaved = false;
         let selectedAttempt: VerifyAttempt | null = null;
+        let selectedAttemptScore = Number.NEGATIVE_INFINITY;
         const verifyMaxIndex = Math.max(
           12,
           Math.min(24, Math.floor(storedMnemonic?.words?.length ?? 12))
         );
+        const hasStoredMnemonicWords = !!storedMnemonic && storedMnemonic.words.length > 0;
+        const resolveTensAmbiguousFallback = (index: number): number => {
+          if (index < 10 || index % 10 !== 0) return -1;
+          const reduced = Math.floor(index / 10);
+          if (reduced < 1 || reduced > verifyMaxIndex) return -1;
+          return reduced;
+        };
 
         for (let attempt = 1; attempt <= MAX_OCR_RETRIES; attempt++) {
           console.log(`[CameraPanel] Verify OCR attempt ${attempt}/${MAX_OCR_RETRIES}...`);
@@ -2426,6 +2532,10 @@ function CameraPanel() {
           const targetWord = storedMnemonic && wordIndex >= 1
             ? storedMnemonic.words[wordIndex - 1]
             : undefined;
+          const fallbackIndex = hasStoredMnemonicWords ? resolveTensAmbiguousFallback(wordIndex) : -1;
+          const fallbackWord = fallbackIndex >= 1 && storedMnemonic
+            ? storedMnemonic.words[fallbackIndex - 1]
+            : undefined;
           const optionsResult = await runVerifyOptionsOcr({
             frameCanvas,
             targetWord,
@@ -2460,13 +2570,38 @@ function CameraPanel() {
             fullFrameImageDataUrl,
           };
           const rawOptions = candidate.optionsRawWords;
-          selectedAttempt = candidate;
+          const mappedOptions = hasStoredMnemonicWords
+            ? rawOptions.map((option) =>
+              mapOptionToMnemonicStrict(option, storedMnemonic.words) ?? option
+            )
+            : rawOptions;
+          const optionIndex = targetWord ? mappedOptions.indexOf(targetWord) : -1;
+          const fallbackOptionIndex = fallbackWord ? mappedOptions.indexOf(fallbackWord) : -1;
+          const matchedByFallback = optionIndex < 0 && fallbackOptionIndex >= 0;
+          const hasBaseReady = candidate.wordIndex >= 1
+            && candidate.wordIndex <= verifyMaxIndex
+            && rawOptions.length >= 3;
+          const hasMatchedOption = !hasStoredMnemonicWords
+            || (!!targetWord && optionIndex >= 0)
+            || matchedByFallback;
+          const attemptScore = (optionIndex >= 0 ? 1200 : 0)
+            + (matchedByFallback ? 950 : 0)
+            + (hasBaseReady ? 100 : 0)
+            + rawOptions.length * 10
+            + (candidate.optionsConfidence / 10);
+          if (!selectedAttempt || attemptScore >= selectedAttemptScore) {
+            selectedAttempt = candidate;
+            selectedAttemptScore = attemptScore;
+          }
 
           console.log(
-            `[CameraPanel] Verify attempt #${attempt}: index=${candidate.wordIndex}, options=${rawOptions.join(', ') || '(empty)'}, optionsConf=${candidate.optionsConfidence.toFixed(0)}%`
+            `[CameraPanel] Verify attempt #${attempt}: index=${candidate.wordIndex}, options=${rawOptions.join(', ') || '(empty)'}, optionsConf=${candidate.optionsConfidence.toFixed(0)}%, target=${targetWord || '(none)'}, optionIndex=${optionIndex}, fallbackIndex=${fallbackIndex}, fallbackWord=${fallbackWord || '(none)'}, fallbackOptionIndex=${fallbackOptionIndex}`
           );
 
-          if (candidate.wordIndex >= 1 && candidate.wordIndex <= verifyMaxIndex && rawOptions.length >= 3) {
+          // For loaded mnemonic flows (including SLIP39), do not stop early unless
+          // one option matches the target word. This avoids false positives from
+          // transient OCR frames where 3 words are read but not the current question options.
+          if (hasBaseReady && hasMatchedOption) {
             break;
           }
 
@@ -2479,7 +2614,7 @@ function CameraPanel() {
           throw new Error('Failed to OCR verification regions');
         }
 
-        const wordIndex = selectedAttempt.wordIndex;
+        let wordIndex = selectedAttempt.wordIndex;
         const numberRawText = selectedAttempt.numberRawText;
         const numberConfidence = selectedAttempt.numberConfidence;
         const optionsConfidence = selectedAttempt.optionsConfidence;
@@ -2494,7 +2629,7 @@ function CameraPanel() {
         const hasStoredMnemonic = !!storedMnemonic && storedMnemonic.words.length > 0;
 
         // Look up the correct word from stored mnemonic
-        const correctWord = hasStoredMnemonic && wordIndex >= 1
+        let correctWord = hasStoredMnemonic && wordIndex >= 1
           ? storedMnemonic.words[wordIndex - 1]
           : null;
 
@@ -2509,6 +2644,22 @@ function CameraPanel() {
         let optionIndex = -1;
         if (correctWord && mappedOptions.length > 0) {
           optionIndex = mappedOptions.indexOf(correctWord);
+        }
+        let indexAdjustHint = '';
+        if (hasStoredMnemonic && optionIndex < 0) {
+          const fallbackIndex = wordIndex >= 10 && wordIndex % 10 === 0
+            ? Math.floor(wordIndex / 10)
+            : -1;
+          if (fallbackIndex >= 1 && fallbackIndex <= storedMnemonic.words.length) {
+            const fallbackWord = storedMnemonic.words[fallbackIndex - 1];
+            const fallbackOptionIndex = mappedOptions.indexOf(fallbackWord);
+            if (fallbackOptionIndex >= 0) {
+              indexAdjustHint = `数字OCR疑似将 #${fallbackIndex} 识别为 #${wordIndex}，已按候选词修正。`;
+              wordIndex = fallbackIndex;
+              correctWord = fallbackWord;
+              optionIndex = fallbackOptionIndex;
+            }
+          }
         }
 
         console.log(
@@ -2526,6 +2677,9 @@ function CameraPanel() {
         }
         resultText += `原始OCR选项: ${rawOptions.join(', ') || '(空)'}\n`;
         resultText += `映射选项: ${mappedOptions.join(', ') || '(空)'}\n`;
+        if (indexAdjustHint) {
+          resultText += `${indexAdjustHint}\n`;
+        }
         if (optionIndex >= 0) {
           resultText += `\n-> 点击选项 ${optionIndex + 1}: ${mappedOptions[optionIndex].toUpperCase()}`;
         } else if (!hasStoredMnemonic) {

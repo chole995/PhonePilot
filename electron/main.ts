@@ -84,35 +84,82 @@ function createWindow() {
   });
 }
 
+const HTTP_REQUEST_RETRY_DELAYS_MS = [250, 600] as const;
+
+function isRetryableNetError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return [
+    'err_network_changed',
+    'err_internet_disconnected',
+    'err_network_io_suspended',
+    'err_name_not_resolved',
+    'err_address_unreachable',
+    'socket hang up',
+  ].some((pattern) => normalized.includes(pattern));
+}
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function performNetRequest(url: string): Promise<{ status: number | undefined; data: string }> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= HTTP_REQUEST_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await new Promise((resolve, reject) => {
+        const request = net.request(url);
+        let responseData = '';
+
+        request.on('response', (response) => {
+          response.on('data', (chunk) => {
+            responseData += chunk.toString();
+          });
+
+          response.on('end', () => {
+            resolve({
+              status: response.statusCode,
+              data: responseData,
+            });
+          });
+
+          response.on('error', (error: Error) => {
+            reject(new Error(`Response error: ${error.message}`));
+          });
+        });
+
+        request.on('error', (error) => {
+          reject(new Error(`Request error: ${error.message}`));
+        });
+
+        request.end();
+      });
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const shouldRetry = isRetryableNetError(lastError.message)
+        && attempt < HTTP_REQUEST_RETRY_DELAYS_MS.length;
+      if (!shouldRetry) {
+        throw lastError;
+      }
+
+      const retryDelay = HTTP_REQUEST_RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `[http-request] Transient network error on attempt ${attempt + 1}, retrying in ${retryDelay}ms: ${lastError.message}`
+      );
+      await delayMs(retryDelay);
+    }
+  }
+
+  throw lastError ?? new Error('Unknown request error');
+}
+
 /**
  * Performs an HTTP request to the arm controller.
  * Used by MCP Server for arm control commands.
  */
 async function httpRequest(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const request = net.request(url);
-    let responseData = '';
-
-    request.on('response', (response) => {
-      response.on('data', (chunk) => {
-        responseData += chunk.toString();
-      });
-
-      response.on('end', () => {
-        resolve(responseData);
-      });
-
-      response.on('error', (error: Error) => {
-        reject(new Error(`Response error: ${error.message}`));
-      });
-    });
-
-    request.on('error', (error) => {
-      reject(new Error(`Request error: ${error.message}`));
-    });
-
-    request.end();
-  });
+  const response = await performNetRequest(url);
+  return response.data;
 }
 
 /**
@@ -309,33 +356,7 @@ ipcMain.handle('get-platform', () => {
  * @returns Promise resolving to { status, data }
  */
 ipcMain.handle('http-request', async (_event, url: string) => {
-  return new Promise((resolve, reject) => {
-    const request = net.request(url);
-    let responseData = '';
-
-    request.on('response', (response) => {
-      response.on('data', (chunk) => {
-        responseData += chunk.toString();
-      });
-
-      response.on('end', () => {
-        resolve({
-          status: response.statusCode,
-          data: responseData,
-        });
-      });
-
-      response.on('error', (error: Error) => {
-        reject(new Error(`Response error: ${error.message}`));
-      });
-    });
-
-    request.on('error', (error) => {
-      reject(new Error(`Request error: ${error.message}`));
-    });
-
-    request.end();
-  });
+  return performNetRequest(url);
 });
 
 /**

@@ -55,6 +55,10 @@ async function executeStep(
   resourceHandle: number,
   httpRequest: (url: string) => Promise<string>
 ): Promise<void> {
+  if ((step.delayBefore ?? 0) > 0) {
+    await delay(step.delayBefore ?? 0);
+  }
+
   if (step.ocrCapture) {
     const ocrCaptureConfig = typeof step.ocrCapture === 'object' ? step.ocrCapture : {};
     // OCR capture step: move arm out of the way without clicking
@@ -193,12 +197,31 @@ async function executeStep(
 
     await delay(50);
 
-    const swipeUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${step.swipeTo.x}Y${step.swipeTo.y}`,
-    });
-    await httpRequest(swipeUrl);
+    const segmentCount = Math.max(1, Math.floor(step.swipeSegments ?? 1));
+    const segmentDelay = Math.max(0, Math.floor(step.swipeSegmentDelay ?? 0));
+    if (segmentCount === 1) {
+      const swipeUrl = buildArmApiUrl({
+        duankou: '0',
+        hco: resourceHandle,
+        daima: `X${step.swipeTo.x}Y${step.swipeTo.y}`,
+      });
+      await httpRequest(swipeUrl);
+    } else {
+      for (let i = 1; i <= segmentCount; i++) {
+        const t = i / segmentCount;
+        const nextX = Math.round(step.x + (step.swipeTo.x - step.x) * t);
+        const nextY = Math.round(step.y + (step.swipeTo.y - step.y) * t);
+        const swipeSegmentUrl = buildArmApiUrl({
+          duankou: '0',
+          hco: resourceHandle,
+          daima: `X${nextX}Y${nextY}`,
+        });
+        await httpRequest(swipeSegmentUrl);
+        if (segmentDelay > 0 && i < segmentCount) {
+          await delay(segmentDelay);
+        }
+      }
+    }
 
     // Wait before raising stylus
     await delay(step.swipeHoldDelay ?? 50);

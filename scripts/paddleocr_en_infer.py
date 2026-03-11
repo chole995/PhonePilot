@@ -6,7 +6,7 @@ Input JSON (stdin line):
 {
   "imageDataUrl": "data:image/jpeg;base64,...",
   "layoutHint": "mnemonic" | "verify-options" | "verify-number" | "generic",  # optional
-  "expectedWordCount": 12 | 18 | 24  # optional
+  "expectedWordCount": 12 | 18 | 20 | 24  # optional
 }
 
 Output JSON (stdout line):
@@ -653,9 +653,9 @@ def infer_once(payload: Dict[str, Any]) -> Dict[str, Any]:
     expected_word_count = int(raw_expected_word_count)
   except (TypeError, ValueError):
     expected_word_count = 0
-  if expected_word_count not in {12, 18, 24}:
+  if expected_word_count not in {12, 18, 20, 24}:
     expected_word_count = 0
-  verify_max_index = expected_word_count if expected_word_count in {12, 18, 24} else 12
+  verify_max_index = expected_word_count if expected_word_count in {12, 18, 20, 24} else 12
 
   if layout_hint in {"verify-number", "verify_number"}:
     try:
