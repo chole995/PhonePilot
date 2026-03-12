@@ -11,6 +11,7 @@ import express, { Request, Response } from 'express';
 import { Server } from 'http';
 import { randomUUID } from 'crypto';
 
+import { getPaddleOcrEnHealth } from '../paddleOcrEn';
 import {
   armConnectSchema,
   executeArmConnect,
@@ -38,6 +39,7 @@ import {
   executeMnemonicVerify,
 } from './tools';
 import { ARM_STATUS_URI, getArmStatusResource } from './resources';
+import { getAllSequenceIds } from './sequences';
 import { sendMcpLog } from './state';
 
 /** MCP Server configuration */
@@ -468,6 +470,7 @@ export class PhonePilotMcpServer {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id');
+      res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id');
 
       if (_req.method === 'OPTIONS') {
         res.sendStatus(200);
@@ -581,11 +584,17 @@ export class PhonePilotMcpServer {
     });
 
     // Health check endpoint
-    app.get('/health', (_req: Request, res: Response) => {
+    app.get('/health', async (_req: Request, res: Response) => {
+      const ocr = await getPaddleOcrEnHealth();
       res.json({
         status: 'ok',
         server: MCP_CONFIG.name,
         version: MCP_CONFIG.version,
+        mcpReady: true,
+        ocrReady: ocr.ready,
+        message: ocr.message,
+        ocr,
+        sequenceIds: getAllSequenceIds(),
         activeSessions: {
           streamable: this.streamableTransports.size,
           sse: this.sseTransports.size,

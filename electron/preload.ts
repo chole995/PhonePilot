@@ -61,11 +61,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // HTTP request (bypasses CORS by going through main process)
   httpRequest: (url: string) => ipcRenderer.invoke('http-request', url),
 
+  tryRecoverArmConnection: (payload: { serverIP: string; comPort: string }) =>
+    ipcRenderer.invoke('try-recover-arm-connection', payload) as Promise<{
+      attempted: boolean;
+      reason: string;
+    }>,
+
+  notifyRendererUnload: (state: {
+    isConnected: boolean;
+    resourceHandle: number;
+    serverIP?: string;
+    comPort: string;
+    currentX?: number;
+    currentY?: number;
+    zDepth?: number;
+  }) => ipcRenderer.send('renderer-unload-arm', state),
+
   // Sync arm connection state with MCP
   syncArmState: (state: {
     isConnected: boolean;
     resourceHandle: number;
+    serverIP?: string;
     comPort: string;
+    currentX?: number;
+    currentY?: number;
+    zDepth?: number;
   }) => ipcRenderer.invoke('sync-arm-state', state),
 
   // MCP Frame capture: Listen for capture requests from main process
@@ -180,10 +200,30 @@ declare global {
       onMainProcessMessage: (callback: (message: string) => void) => void;
       sendMessage: (channel: string, data: unknown) => void;
       httpRequest: (url: string) => Promise<{ status: number; data: string }>;
+      tryRecoverArmConnection: (payload: {
+        serverIP: string;
+        comPort: string;
+      }) => Promise<{
+        attempted: boolean;
+        reason: string;
+      }>;
+      notifyRendererUnload: (state: {
+        isConnected: boolean;
+        resourceHandle: number;
+        serverIP?: string;
+        comPort: string;
+        currentX?: number;
+        currentY?: number;
+        zDepth?: number;
+      }) => void;
       syncArmState: (state: {
         isConnected: boolean;
         resourceHandle: number;
+        serverIP?: string;
         comPort: string;
+        currentX?: number;
+        currentY?: number;
+        zDepth?: number;
       }) => Promise<void>;
       // MCP Frame capture
       onCaptureFrameRequest: (callback: () => void) => () => void;

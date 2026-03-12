@@ -12,13 +12,16 @@ import {
   capturePreOcrFrame,
   runMnemonicOcr,
   runVerifyOcr,
+  clearMnemonicWords,
+  getStoredMnemonicWords,
   storeMnemonicWords,
+  storeStructuredMnemonicState,
   delay,
   ARM_CONFIG,
   shouldStopSequenceExecution,
   setStopSequenceFlag,
 } from '../state';
-import { getSequence, getFullSteps, getAllSequenceIds } from '../sequences';
+import { getSequence, getPageAction, getAllSequenceIds } from '../sequences';
 import { saveCaptureToDownloads } from '../../saveCapture';
 
 import type { AutoStep } from '../sequences';
@@ -46,6 +49,16 @@ export interface ExecuteSequenceOutput {
   stepsCompleted?: number;
   totalSteps?: number;
 }
+
+const SLIP39_CREATE_SEQUENCE_CONFIG: Record<
+  string,
+  { shareCount: number; threshold: number }
+> = {
+  'create-slip39-single-template': { shareCount: 1, threshold: 1 },
+  'create-slip39-multi-2of2-template': { shareCount: 2, threshold: 2 },
+  'create-slip39-multi-8of8-template': { shareCount: 8, threshold: 8 },
+  'create-slip39-multi-16of2-template': { shareCount: 16, threshold: 2 },
+};
 
 /**
  * Executes a single step (click, swipe, or OCR capture).
@@ -305,32 +318,89 @@ export async function executeExecuteSequence(
     };
   }
 
-  const steps = getFullSteps(sequence);
+  const totalSteps = sequence.actions.reduce((sum, actionId) => {
+    const action = getPageAction(actionId);
+    if (!action) {
+      return sum;
+    }
+    return sum + (action.buildSteps ? action.buildSteps().length : action.steps.length);
+  }, 0);
   let stepsCompleted = 0;
+  const slip39CreateConfig = SLIP39_CREATE_SEQUENCE_CONFIG[sequence.id];
+  const capturedShares: string[][] = [];
 
   // Reset stop flag at start
   setStopSequenceFlag(false);
+  clearMnemonicWords();
 
   try {
-    for (const step of steps) {
-      // Check stop flag before each step
-      if (shouldStopSequenceExecution()) {
-        return {
-          output: {
-            success: false,
-            message: `Sequence "${sequence.name}" stopped by user at step ${stepsCompleted + 1}`,
-            sequenceId: sequence.id,
-            sequenceName: sequence.name,
-            stepsCompleted,
-            totalSteps: steps.length,
-          },
-          frame: null,
-        };
+    for (const actionId of sequence.actions) {
+      const action = getPageAction(actionId);
+      if (!action) {
+        throw new Error(`Unknown page action ID: ${actionId}`);
       }
 
-      await executeStep(step, state.resourceHandle, httpRequest);
-      stepsCompleted++;
-      console.log(`[execute-sequence] Step ${stepsCompleted}/${steps.length}: ${step.label}`);
+      const actionSteps = action.buildSteps ? action.buildSteps() : action.steps;
+
+      for (const step of actionSteps) {
+        if (shouldStopSequenceExecution()) {
+          return {
+            output: {
+              success: false,
+              message: `Sequence "${sequence.name}" stopped by user at step ${stepsCompleted + 1}`,
+              sequenceId: sequence.id,
+              sequenceName: sequence.name,
+              stepsCompleted,
+              totalSteps,
+            },
+            frame: null,
+          };
+        }
+
+        await executeStep(step, state.resourceHandle, httpRequest);
+        stepsCompleted++;
+        console.log(`[execute-sequence] Step ${stepsCompleted}/${totalSteps}: ${step.label}`);
+      }
+
+      if (slip39CreateConfig && action.id === 'create-screenshot-20-part2') {
+        const shareWords = getStoredMnemonicWords();
+        if (shareWords.length === 0) {
+          throw new Error('SLIP39 share capture is empty after create-screenshot-20-part2');
+        }
+        capturedShares.push([...shareWords]);
+        console.log(
+          `[execute-sequence] Captured SLIP39 share ${capturedShares.length}/${slip39CreateConfig.shareCount}`
+        );
+      }
+    }
+
+    if (slip39CreateConfig) {
+      const latestWords = capturedShares[capturedShares.length - 1] || getStoredMnemonicWords();
+      storeStructuredMnemonicState(
+        {
+          words: latestWords,
+          shares: capturedShares,
+          shareCount: slip39CreateConfig.shareCount,
+          threshold: slip39CreateConfig.threshold,
+          sequenceId: sequence.id,
+          walletType: 'slip39',
+          flowType: 'create',
+        },
+        'sequence-create-slip39'
+      );
+    } else if (sequence.id.startsWith('create-wallet')) {
+      const createdWords = getStoredMnemonicWords();
+      if (createdWords.length > 0) {
+        storeStructuredMnemonicState(
+          {
+            words: createdWords,
+            sequenceId: sequence.id,
+            walletType: 'bip39',
+            flowType: 'create',
+          },
+          'sequence-create-bip39'
+        );
+      }
     }
 
     // Capture frame if requested
@@ -346,7 +416,7 @@ export async function executeExecuteSequence(
         sequenceId: sequence.id,
         sequenceName: sequence.name,
         stepsCompleted,
-        totalSteps: steps.length,
+        totalSteps,
       },
       frame,
     };
@@ -359,7 +429,7 @@ export async function executeExecuteSequence(
         sequenceId: sequence.id,
         sequenceName: sequence.name,
         stepsCompleted,
-        totalSteps: steps.length,
+        totalSteps,
       },
       frame: null,
     };

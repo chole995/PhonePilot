@@ -82,8 +82,8 @@ git clone https://github.com/your-username/PhonePilot.git
 cd PhonePilot
 yarn install
 
-# 安装 OCR 依赖（建议 paddleocr 3.x）
-python3 -m pip install --user paddlepaddle==3.3.0 "paddleocr>=3,<4" opencv-python pillow pyyaml huggingface_hub
+# 初始化 OCR Python 环境（会创建 scripts/.venv）
+yarn setup:ocr
 
 # 下载 OCR 模型到本地
 python3 - <<'PY'
@@ -105,6 +105,13 @@ PY
 
 yarn electron:dev
 ```
+
+说明：
+
+- `yarn setup:ocr` 会执行 `scripts/setup_ocr.sh`
+- 脚本会自动查找兼容的 Python 3.9 - 3.12，并在 `scripts/.venv` 中安装 OCR 依赖
+- Electron 开发态会自动优先使用 `scripts/.venv/bin/python`
+- 如需手动指定 Python，可设置环境变量 `PHONEPILOT_PYTHON_BIN=/path/to/python`
 
 ### 构建
 

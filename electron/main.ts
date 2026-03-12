@@ -8,6 +8,13 @@ import {
   setPreOcrCaptureCallback,
   setMnemonicOcrCallback,
   setVerifyOcrCallback,
+  getArmState,
+  updateArmState,
+  resetArmState,
+  buildArmApiUrl,
+  delay as armDelay,
+  ARM_CONFIG,
+  type ArmState,
   type MnemonicOcrResult,
   type MnemonicOcrRequest,
   type VerifyOcrResult,
@@ -36,6 +43,8 @@ let pendingFrameResolve: ((frame: string | null) => void) | null = null;
 let pendingPreOcrResolve: ((payload: string | null) => void) | null = null;
 let pendingMnemonicOcrResolve: ((payload: MnemonicOcrResult | null) => void) | null = null;
 let pendingVerifyOcrResolve: ((payload: VerifyOcrResult | null) => void) | null = null;
+let armDisconnectInFlight: Promise<void> | null = null;
+let hasCompletedArmCleanupBeforeQuit = false;
 
 /** Use bracket notation to avoid vite:define plugin transformation */
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
@@ -102,10 +111,26 @@ function delayMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function performNetRequest(url: string): Promise<{ status: number | undefined; data: string }> {
+function formatRequestTarget(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+async function performNetRequest(
+  url: string,
+  context = 'ui-http-request'
+): Promise<{ status: number | undefined; data: string }> {
   let lastError: Error | null = null;
+  const target = formatRequestTarget(url);
 
   for (let attempt = 0; attempt <= HTTP_REQUEST_RETRY_DELAYS_MS.length; attempt++) {
+    const startedAt = Date.now();
+    console.log(`[http-request][${context}] attempt=${attempt + 1} -> ${target}`);
+
     try {
       return await new Promise((resolve, reject) => {
         const request = net.request(url);
@@ -117,6 +142,9 @@ async function performNetRequest(url: string): Promise<{ status: number | undefi
           });
 
           response.on('end', () => {
+            console.log(
+              `[http-request][${context}] success status=${response.statusCode ?? 'unknown'} elapsed=${Date.now() - startedAt}ms <- ${target}`
+            );
             resolve({
               status: response.statusCode,
               data: responseData,
@@ -136,6 +164,9 @@ async function performNetRequest(url: string): Promise<{ status: number | undefi
       });
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      console.warn(
+        `[http-request][${context}] failure attempt=${attempt + 1} elapsed=${Date.now() - startedAt}ms: ${lastError.message}`
+      );
       const shouldRetry = isRetryableNetError(lastError.message)
         && attempt < HTTP_REQUEST_RETRY_DELAYS_MS.length;
       if (!shouldRetry) {
@@ -158,8 +189,83 @@ async function performNetRequest(url: string): Promise<{ status: number | undefi
  * Used by MCP Server for arm control commands.
  */
 async function httpRequest(url: string): Promise<string> {
-  const response = await performNetRequest(url);
+  const response = await performNetRequest(url, 'mcp-http-request');
   return response.data;
+}
+
+async function disconnectArmController(reason: string): Promise<void> {
+  if (armDisconnectInFlight) {
+    return armDisconnectInFlight;
+  }
+
+  const state = getArmState();
+  if (!state.isConnected || state.resourceHandle <= 0) {
+    console.log(`[arm-cleanup] Skip cleanup after ${reason}: no active arm session`);
+    resetArmState();
+    return;
+  }
+
+  armDisconnectInFlight = (async () => {
+    console.log(
+      `[arm-cleanup] Start cleanup after ${reason}: server=${state.serverIP} com=${state.comPort} handle=${state.resourceHandle}`
+    );
+    try {
+      const resetUrl = buildArmApiUrl({
+        duankou: '0',
+        hco: state.resourceHandle,
+        daima: 'X0Y0Z0',
+      });
+      await performNetRequest(resetUrl, `arm-cleanup:${reason}:reset`);
+      await armDelay(ARM_CONFIG.commandDelay);
+
+      const closeUrl = buildArmApiUrl({
+        duankou: '0',
+        hco: state.resourceHandle,
+        daima: '0',
+      });
+      await performNetRequest(closeUrl, `arm-cleanup:${reason}:close`);
+
+      console.log(
+        `[arm-cleanup] Released ${state.comPort} (handle ${state.resourceHandle}) after ${reason}`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[arm-cleanup] Failed after ${reason}: ${message}`);
+    } finally {
+      resetArmState();
+    }
+  })().finally(() => {
+    armDisconnectInFlight = null;
+  });
+
+  return armDisconnectInFlight;
+}
+
+async function tryRecoverArmConnection(
+  serverIP: string,
+  comPort: string
+): Promise<{ attempted: boolean; reason: string }> {
+  const state = getArmState();
+
+  if (!state.isConnected || state.resourceHandle <= 0) {
+    return {
+      attempted: false,
+      reason: 'no-active-session',
+    };
+  }
+
+  if (state.serverIP !== serverIP || state.comPort !== comPort) {
+    return {
+      attempted: false,
+      reason: 'session-mismatch',
+    };
+  }
+
+  await disconnectArmController('connect recovery');
+  return {
+    attempted: true,
+    reason: 'recovered-stale-session',
+  };
 }
 
 /**
@@ -330,6 +436,19 @@ app.on('window-all-closed', () => {
 });
 
 /** Clean up MCP Server before quitting */
+app.on('before-quit', (event) => {
+  if (hasCompletedArmCleanupBeforeQuit) {
+    return;
+  }
+
+  event.preventDefault();
+  void disconnectArmController('application quit').finally(() => {
+    hasCompletedArmCleanupBeforeQuit = true;
+    app.quit();
+  });
+});
+
+/** Clean up MCP Server before quitting */
 app.on('will-quit', () => {
   if (mcpServer) {
     mcpServer.stop();
@@ -356,8 +475,17 @@ ipcMain.handle('get-platform', () => {
  * @returns Promise resolving to { status, data }
  */
 ipcMain.handle('http-request', async (_event, url: string) => {
-  return performNetRequest(url);
+  return performNetRequest(url, 'renderer-http-request');
 });
+
+ipcMain.handle(
+  'try-recover-arm-connection',
+  async (_event, payload: { serverIP: string; comPort: string }) => {
+    const result = await tryRecoverArmConnection(payload.serverIP, payload.comPort);
+    console.log('[arm-recovery] result:', result, payload);
+    return result;
+  }
+);
 
 /**
  * IPC handler: Syncs arm connection state from UI to MCP state.
@@ -366,15 +494,66 @@ ipcMain.handle('http-request', async (_event, url: string) => {
 ipcMain.handle('sync-arm-state', async (_event, state: {
   isConnected: boolean;
   resourceHandle: number;
+  serverIP?: string;
   comPort: string;
+  currentX?: number;
+  currentY?: number;
+  zDepth?: number;
 }) => {
-  const { updateArmState } = await import('./mcp/state.js');
-  updateArmState({
+  const nextState: Partial<ArmState> = {
     isConnected: state.isConnected,
     resourceHandle: state.resourceHandle,
     comPort: state.comPort,
-  });
+  };
+
+  if (typeof state.serverIP === 'string') {
+    nextState.serverIP = state.serverIP;
+  }
+  if (typeof state.currentX === 'number') {
+    nextState.currentX = state.currentX;
+  }
+  if (typeof state.currentY === 'number') {
+    nextState.currentY = state.currentY;
+  }
+  if (typeof state.zDepth === 'number') {
+    nextState.zDepth = state.zDepth;
+  }
+
+  updateArmState(nextState);
   console.log(`[sync-arm-state] Updated MCP armState:`, state);
+});
+
+ipcMain.on('renderer-unload-arm', (_event, state: {
+  isConnected: boolean;
+  resourceHandle: number;
+  serverIP?: string;
+  comPort: string;
+  currentX?: number;
+  currentY?: number;
+  zDepth?: number;
+}) => {
+  const nextState: Partial<ArmState> = {
+    isConnected: state.isConnected,
+    resourceHandle: state.resourceHandle,
+    comPort: state.comPort,
+  };
+
+  if (typeof state.serverIP === 'string') {
+    nextState.serverIP = state.serverIP;
+  }
+  if (typeof state.currentX === 'number') {
+    nextState.currentX = state.currentX;
+  }
+  if (typeof state.currentY === 'number') {
+    nextState.currentY = state.currentY;
+  }
+  if (typeof state.zDepth === 'number') {
+    nextState.zDepth = state.zDepth;
+  }
+
+  updateArmState(nextState);
+  console.log('[renderer-unload-arm] Received renderer unload state:', nextState);
+  void disconnectArmController('renderer unload');
 });
 
 ipcMain.handle(

@@ -966,6 +966,17 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: '复位', x: 0, y: 0, depth: 12 },
     ],
   },
+  {
+    id: 'suffix-finish-paced',
+    name: '完成流程(慢速)',
+    group: '完成',
+    steps: [
+      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 1200 },
+      { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 1200 },
+      { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 2500 },
+      { label: '复位', x: 0, y: 0, depth: 12 },
+    ],
+  },
 
   // --------------------------------------------------------------------------
   // 设备管理 (Device Management)
@@ -1009,6 +1020,34 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       // Final confirmation with wait
       { label: 'Confirm', x: 25, y: 85, depth: 12, delayAfter: 10000 },
       // Reset to origin
+      { label: 'Reset position', x: 0, y: 0, depth: 12 },
+    ],
+  },
+  {
+    id: 'reset-wallet-unlocked-action',
+    name: '重置钱包流程(已解锁)',
+    group: '设备管理',
+    steps: [
+      { label: 'Unlock swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 }, delayAfter: 1800 },
+      { label: 'Settings app', x: 50, y: 65, depth: 12 },
+      { label: 'Wallet section', x: 50, y: 55, depth: 12 },
+      { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 } },
+      { label: 'Click 1', x: 50, y: 85, depth: 12 },
+      { label: 'Click 2', x: 50, y: 85, depth: 12 },
+      { label: 'Setting 1', x: 25, y: 44, depth: 12, delayAfter: 600 },
+      { label: 'Setting 2', x: 25, y: 55, depth: 12, delayAfter: 900 },
+      {
+        label: 'Swipe right',
+        x: 20,
+        y: 75,
+        depth: 12,
+        swipeTo: { x: 60, y: 75 },
+        swipeSegments: 6,
+        swipeSegmentDelay: 70,
+        swipeHoldDelay: 900,
+        delayAfter: 7000,
+      },
+      { label: 'Confirm', x: 25, y: 85, depth: 12, delayAfter: 10000 },
       { label: 'Reset position', x: 0, y: 0, depth: 12 },
     ],
   },
@@ -1111,6 +1150,18 @@ const ALL_SEQUENCES: AutoSequence[] = [
     category: '设备管理',
     actions: ['reset-wallet-action'],
   },
+  {
+    id: 'reset-wallet-locked',
+    name: '重置钱包(锁定态)',
+    category: '设备管理',
+    actions: ['reset-wallet-action'],
+  },
+  {
+    id: 'reset-wallet-unlocked',
+    name: '重置钱包(已解锁)',
+    category: '设备管理',
+    actions: ['reset-wallet-unlocked-action'],
+  },
 
   // ============================================================================
   // 创建钱包
@@ -1206,31 +1257,31 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'words-12',
     name: '12个词(all)',
     category: 'BIP39 12词',
-    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-words-12-all', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-words-12-all', 'suffix-finish-paced'],
   },
   {
     id: 'one-normal-12',
     name: '12词-1',
     category: 'BIP39 12词',
-    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-1', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-1', 'suffix-finish-paced'],
   },
   {
     id: 'two-normal-12',
     name: '12词-2',
     category: 'BIP39 12词',
-    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-2', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-2', 'suffix-finish-paced'],
   },
   {
     id: 'three-normal-12',
     name: '12词-3',
     category: 'BIP39 12词',
-    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-3', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-3', 'suffix-finish-paced'],
   },
   {
     id: 'api-normal-12',
     name: '签名方法',
     category: 'BIP39 12词',
-    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-api', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-12-words', 'input-mnemonic-12-api', 'suffix-finish-paced'],
   },
 
   // ============================================================================
@@ -1240,19 +1291,19 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'one-normal-18',
     name: '18词-1',
     category: 'BIP39 18词',
-    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-1', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-1', 'suffix-finish-paced'],
   },
   {
     id: 'two-normal-18',
     name: '18词-2',
     category: 'BIP39 18词',
-    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-2', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-2', 'suffix-finish-paced'],
   },
   {
     id: 'three-normal-18',
     name: '18词-3',
     category: 'BIP39 18词',
-    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-3', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-18-words', 'input-mnemonic-18-3', 'suffix-finish-paced'],
   },
 
   // ============================================================================
@@ -1262,19 +1313,19 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'one-normal-24',
     name: '24词-1',
     category: 'BIP39 24词',
-    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-1', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-1', 'suffix-finish-paced'],
   },
   {
     id: 'two-normal-24',
     name: '24词-2',
     category: 'BIP39 24词',
-    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-2', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-2', 'suffix-finish-paced'],
   },
   {
     id: 'three-normal-24',
     name: '24词-3',
     category: 'BIP39 24词',
-    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-3', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-24-words', 'input-mnemonic-24-3', 'suffix-finish-paced'],
   },
 
   // ============================================================================

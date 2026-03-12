@@ -61,3 +61,8 @@ coverage/
 # Misc
 *.local
 .cache/
+
+# Python OCR venv
+scripts/.venv/
+
+./claude/worktrees/*

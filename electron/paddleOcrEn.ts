@@ -1,7 +1,8 @@
 import { app } from 'electron';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
 
 export interface PaddleOcrEnRequest {
   imageDataUrl: string;
@@ -16,8 +17,61 @@ export interface PaddleOcrEnResult {
   elapsedMs: number;
 }
 
+export interface PaddleOcrEnHealthStatus {
+  ready: boolean;
+  pythonBin: string;
+  pythonVersion?: string;
+  scriptPath?: string;
+  missingDependencies: string[];
+  missingModels: string[];
+  message: string;
+  checkedAt: string;
+}
+
+const execFileAsync = promisify(execFile);
+const HEALTH_CACHE_TTL_MS = 30 * 1000;
+const REQUIRED_PYTHON_MODULES = [
+  'paddleocr',
+  'paddle',
+  'cv2',
+  'PIL',
+  'yaml',
+  'huggingface_hub',
+] as const;
+const REQUIRED_MODEL_CONFIGS = [
+  {
+    name: 'en_PP-OCRv5_mobile_rec',
+    envKeys: ['PHONEPILOT_OCR_MODEL_DIR', 'PHONEPILOT_EN_OCR_MODEL_DIR'],
+  },
+  {
+    name: 'PP-OCRv5_mobile_rec',
+    envKeys: ['PHONEPILOT_OCR_MULTI_REC_MODEL_DIR'],
+  },
+  {
+    name: 'PP-OCRv5_mobile_det',
+    envKeys: ['PHONEPILOT_OCR_DET_MODEL_DIR'],
+  },
+] as const;
+const REQUIRED_MODEL_FILES = ['inference.json', 'inference.pdiparams', 'inference.yml'] as const;
+
+let cachedHealthStatus: { expiresAt: number; value: PaddleOcrEnHealthStatus } | null = null;
+
 function resolvePythonBin(): string {
-  return process.env.PHONEPILOT_PYTHON_BIN || 'python3';
+  if (process.env.PHONEPILOT_PYTHON_BIN) {
+    return process.env.PHONEPILOT_PYTHON_BIN;
+  }
+  // In dev mode, prefer the project-local venv created by scripts/setup_ocr.sh
+  const venvCandidates = [
+    path.join(app.getAppPath(), 'scripts', '.venv', 'bin', 'python'),
+    path.join(process.cwd(), 'scripts', '.venv', 'bin', 'python'),
+    path.join(__dirname, '..', 'scripts', '.venv', 'bin', 'python'),
+  ];
+  for (const candidate of venvCandidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return 'python3';
 }
 
 function resolveInferScriptPath(): string {
@@ -36,6 +90,149 @@ function resolveInferScriptPath(): string {
   throw new Error(
     `paddleocr_en_infer.py not found. Checked: ${candidates.join(', ')}`
   );
+}
+
+function resolveProjectRootCandidates(): string[] {
+  return [
+    app.getAppPath(),
+    process.cwd(),
+    path.join(__dirname, '..'),
+  ];
+}
+
+function resolveModelDir(
+  defaultName: string,
+  envKeys: readonly string[]
+): string | null {
+  for (const envKey of envKeys) {
+    const value = (process.env[envKey] || '').trim();
+    if (value) {
+      const resolved = path.resolve(value);
+      return fs.existsSync(resolved) ? resolved : null;
+    }
+  }
+
+  for (const root of resolveProjectRootCandidates()) {
+    const candidate = path.join(root, 'models', 'ocr_bench', defaultName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function probePythonEnvironment(
+  pythonBin: string
+): Promise<{ pythonVersion?: string; missingDependencies: string[]; error?: string }> {
+  const env = { ...process.env };
+  delete env.HTTP_PROXY;
+  delete env.HTTPS_PROXY;
+  delete env.ALL_PROXY;
+  delete env.http_proxy;
+  delete env.https_proxy;
+  delete env.all_proxy;
+
+  const command = [
+    'import importlib.util, json, sys',
+    `modules = ${JSON.stringify(REQUIRED_PYTHON_MODULES)}`,
+    'missing = [name for name in modules if importlib.util.find_spec(name) is None]',
+    "print(json.dumps({'pythonVersion': sys.version.split()[0], 'missingDependencies': missing}))",
+  ].join('; ');
+
+  try {
+    const { stdout } = await execFileAsync(pythonBin, ['-c', command], {
+      env,
+      timeout: 15 * 1000,
+      maxBuffer: 256 * 1024,
+    });
+    const parsed = JSON.parse(stdout.trim()) as {
+      pythonVersion?: string;
+      missingDependencies?: string[];
+    };
+    return {
+      pythonVersion: parsed.pythonVersion,
+      missingDependencies: Array.isArray(parsed.missingDependencies)
+        ? parsed.missingDependencies
+        : [],
+    };
+  } catch (error) {
+    return {
+      missingDependencies: [...REQUIRED_PYTHON_MODULES],
+      error: error instanceof Error ? error.message : 'Unknown python probe error',
+    };
+  }
+}
+
+function collectMissingModels(): string[] {
+  const missingModels: string[] = [];
+
+  for (const config of REQUIRED_MODEL_CONFIGS) {
+    const modelDir = resolveModelDir(config.name, config.envKeys);
+    if (!modelDir) {
+      missingModels.push(`${config.name}: directory not found`);
+      continue;
+    }
+
+    for (const fileName of REQUIRED_MODEL_FILES) {
+      const filePath = path.join(modelDir, fileName);
+      if (!fs.existsSync(filePath)) {
+        missingModels.push(`${config.name}: missing ${fileName}`);
+      }
+    }
+  }
+
+  return missingModels;
+}
+
+export async function getPaddleOcrEnHealth(
+  forceRefresh = false
+): Promise<PaddleOcrEnHealthStatus> {
+  if (!forceRefresh && cachedHealthStatus && cachedHealthStatus.expiresAt > Date.now()) {
+    return cachedHealthStatus.value;
+  }
+
+  const pythonBin = resolvePythonBin();
+  let scriptPath: string | undefined;
+  let message = 'OCR ready';
+
+  try {
+    scriptPath = resolveInferScriptPath();
+  } catch (error) {
+    message = error instanceof Error ? error.message : 'paddleocr_en_infer.py not found';
+  }
+
+  const pythonProbe = await probePythonEnvironment(pythonBin);
+  const missingDependencies = [...pythonProbe.missingDependencies];
+  const missingModels = collectMissingModels();
+
+  if (pythonProbe.error) {
+    message = pythonProbe.error;
+  } else if (missingDependencies.length > 0) {
+    message = `Python dependencies missing: ${missingDependencies.join(', ')}`;
+  } else if (missingModels.length > 0) {
+    message = `OCR models missing: ${missingModels.join(', ')}`;
+  } else if (!scriptPath) {
+    message = 'OCR infer script not found';
+  }
+
+  const value: PaddleOcrEnHealthStatus = {
+    ready: Boolean(scriptPath) && missingDependencies.length === 0 && missingModels.length === 0,
+    pythonBin,
+    pythonVersion: pythonProbe.pythonVersion,
+    scriptPath,
+    missingDependencies,
+    missingModels,
+    message,
+    checkedAt: new Date().toISOString(),
+  };
+
+  cachedHealthStatus = {
+    value,
+    expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
+  };
+
+  return value;
 }
 
 export async function runPaddleOcrEn(

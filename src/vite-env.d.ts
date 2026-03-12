@@ -48,11 +48,31 @@ interface Window {
     onMainProcessMessage: (callback: (message: string) => void) => void;
     sendMessage: (channel: string, data: unknown) => void;
     httpRequest: (url: string) => Promise<{ status: number; data: string }>;
+    tryRecoverArmConnection: (payload: {
+      serverIP: string;
+      comPort: string;
+    }) => Promise<{
+      attempted: boolean;
+      reason: string;
+    }>;
+    notifyRendererUnload: (state: {
+      isConnected: boolean;
+      resourceHandle: number;
+      serverIP?: string;
+      comPort: string;
+      currentX?: number;
+      currentY?: number;
+      zDepth?: number;
+    }) => void;
     // Sync arm connection state with MCP
     syncArmState: (state: {
       isConnected: boolean;
       resourceHandle: number;
+      serverIP?: string;
       comPort: string;
+      currentX?: number;
+      currentY?: number;
+      zDepth?: number;
     }) => Promise<void>;
     // MCP Frame capture
     onCaptureFrameRequest: (callback: () => void) => () => void;

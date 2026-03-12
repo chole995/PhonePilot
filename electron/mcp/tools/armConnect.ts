@@ -8,6 +8,7 @@ import {
   getArmState,
   updateArmState,
   buildArmApiUrl,
+  parseServerResponse,
   parseResourceHandle,
   delay,
   ARM_CONFIG,
@@ -85,9 +86,12 @@ export async function executeArmConnect(
         handle: resourceHandle,
       };
     } else {
+      const cleanResponse = parseServerResponse(response);
       return {
         success: false,
-        message: `Failed to open port ${comPort}. Check if port is occupied or device is connected.`,
+        message: cleanResponse
+          ? `Failed to open port ${comPort}. Controller response: ${cleanResponse}`
+          : `Failed to open port ${comPort}. Check if port is occupied or device is connected.`,
       };
     }
   } catch (error) {

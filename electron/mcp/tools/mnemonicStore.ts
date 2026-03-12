@@ -6,11 +6,12 @@
 import { z } from 'zod';
 import {
   storeMnemonicWords,
-  getStoredMnemonicWords,
+  getStoredMnemonicState,
   getMnemonicMetadata,
   clearMnemonicWords,
   hasMnemonicWords,
 } from '../state';
+import type { MnemonicStoreMetadata } from '../state';
 
 /** Input schema for mnemonic-store tool */
 export const mnemonicStoreSchema = z.object({
@@ -30,11 +31,13 @@ export interface MnemonicStoreOutput {
   message: string;
   words?: string[];
   wordCount?: number;
-  metadata?: {
-    capturedAt?: string;
-    wordCount?: number;
-    source?: string;
-  };
+  metadata?: MnemonicStoreMetadata;
+  shares?: string[][];
+  shareCount?: number;
+  threshold?: number;
+  sequenceId?: string;
+  walletType?: 'bip39' | 'slip39';
+  flowType?: 'create' | 'import' | 'manual';
 }
 
 /**
@@ -79,8 +82,8 @@ export async function executeMnemonicStore(
     }
 
     case 'get': {
-      const storedWords = getStoredMnemonicWords();
-      const metadata = getMnemonicMetadata();
+      const storedState = getStoredMnemonicState();
+      const storedWords = storedState.words;
 
       if (storedWords.length === 0) {
         return {
@@ -94,7 +97,13 @@ export async function executeMnemonicStore(
         message: `Retrieved ${storedWords.length} mnemonic words`,
         words: storedWords,
         wordCount: storedWords.length,
-        metadata,
+        metadata: storedState.metadata,
+        shares: storedState.shares,
+        shareCount: storedState.shareCount,
+        threshold: storedState.threshold,
+        sequenceId: storedState.sequenceId,
+        walletType: storedState.walletType,
+        flowType: storedState.flowType,
       };
     }
 
@@ -108,6 +117,7 @@ export async function executeMnemonicStore(
 
     case 'status': {
       const hasWords = hasMnemonicWords();
+      const storedState = getStoredMnemonicState();
       const metadata = getMnemonicMetadata();
 
       return {
@@ -117,6 +127,12 @@ export async function executeMnemonicStore(
           : 'No mnemonic words stored',
         wordCount: metadata.wordCount || 0,
         metadata: hasWords ? metadata : undefined,
+        shares: hasWords ? storedState.shares : undefined,
+        shareCount: hasWords ? storedState.shareCount : undefined,
+        threshold: hasWords ? storedState.threshold : undefined,
+        sequenceId: hasWords ? storedState.sequenceId : undefined,
+        walletType: hasWords ? storedState.walletType : undefined,
+        flowType: hasWords ? storedState.flowType : undefined,
       };
     }
 

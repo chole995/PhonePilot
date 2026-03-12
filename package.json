@@ -8,6 +8,7 @@
   "private": true,
   "scripts": {
     "dev": "vite",
+    "setup:ocr": "bash scripts/setup_ocr.sh",
     "build": "tsc && vite build && electron-builder --dir",
     "build:win": "tsc && vite build && electron-builder --win",
     "build:mac": "tsc && vite build && electron-builder --mac",

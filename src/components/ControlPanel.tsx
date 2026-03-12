@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   ARM_CONTROLLER_CONFIG,
   buildArmApiUrl,
+  parseServerResponse,
   parseResourceHandle,
 } from '../config/armController';
 import './ControlPanel.css';
@@ -121,6 +122,7 @@ function ControlPanel() {
    */
   const sendCommand = useCallback(async (params: { duankou: string; hco: number; daima: string }): Promise<string> => {
     const url = buildArmApiUrl(state.serverIP, params);
+    console.log('[ControlPanel] sendCommand ->', { url, params });
     try {
       if (window.electronAPI?.httpRequest) {
         const response = await window.electronAPI.httpRequest(url);
@@ -131,11 +133,60 @@ function ControlPanel() {
         return text;
       }
     } catch (error) {
-      throw new Error(`Request failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[ControlPanel] sendCommand failed:', { url, params, error: errorMessage });
+      throw new Error(`Request failed: ${errorMessage}（请求地址：${url}）`);
     }
   }, [state.serverIP]);
 
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const syncArmStateToMain = useCallback(
+    async (updates: Partial<ControlPanelState>) => {
+      if (!window.electronAPI?.syncArmState) return;
+
+      const nextState = { ...state, ...updates };
+      await window.electronAPI.syncArmState({
+        isConnected: nextState.isConnected,
+        resourceHandle: nextState.resourceHandle,
+        serverIP: nextState.serverIP,
+        comPort: nextState.comPort,
+        currentX: nextState.currentX,
+        currentY: nextState.currentY,
+        zDepth: nextState.zDepth,
+      });
+    },
+    [state]
+  );
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (!window.electronAPI?.notifyRendererUnload) return;
+
+      window.electronAPI.notifyRendererUnload({
+        isConnected: state.isConnected,
+        resourceHandle: state.resourceHandle,
+        serverIP: state.serverIP,
+        comPort: state.comPort,
+        currentX: state.currentX,
+        currentY: state.currentY,
+        zDepth: state.zDepth,
+      });
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [
+    state.isConnected,
+    state.resourceHandle,
+    state.serverIP,
+    state.comPort,
+    state.currentX,
+    state.currentY,
+    state.zDepth,
+  ]);
 
   /**
    * Connects to the arm controller by opening the COM port.
@@ -147,13 +198,36 @@ function ControlPanel() {
     setState(prev => ({ ...prev, isLoading: true, error: null }));
 
     try {
-      const result = await sendCommand({
+      let result = await sendCommand({
         duankou: state.comPort,
         hco: 0,
         daima: '0',
       });
 
-      const resourceHandle = parseResourceHandle(result);
+      let resourceHandle = parseResourceHandle(result);
+
+      if (resourceHandle <= 0 && window.electronAPI?.tryRecoverArmConnection) {
+        const recovery = await window.electronAPI.tryRecoverArmConnection({
+          serverIP: state.serverIP,
+          comPort: state.comPort,
+        });
+
+        addLog(
+          '连接',
+          recovery.attempted
+            ? `检测到可能存在旧连接，已尝试自动释放 ${state.comPort}`
+            : `连接失败后未执行自动恢复：${recovery.reason}`
+        );
+
+        if (recovery.attempted) {
+          result = await sendCommand({
+            duankou: state.comPort,
+            hco: 0,
+            daima: '0',
+          });
+          resourceHandle = parseResourceHandle(result);
+        }
+      }
 
       if (resourceHandle > 0) {
         setState(prev => ({
@@ -165,22 +239,27 @@ function ControlPanel() {
         }));
 
         // Sync state to MCP
-        if (window.electronAPI?.syncArmState) {
-          await window.electronAPI.syncArmState({
-            isConnected: true,
-            resourceHandle,
-            comPort: state.comPort,
-          });
-        }
+        await syncArmStateToMain({
+          isConnected: true,
+          resourceHandle,
+          serverIP: state.serverIP,
+          comPort: state.comPort,
+          currentX: 0,
+          currentY: 0,
+          zDepth: state.zDepth,
+        });
 
         await delay(ARM_CONTROLLER_CONFIG.deviceReadyDelay);
 
         setState(prev => ({ ...prev, isReady: true }));
       } else {
+        const cleanResponse = parseServerResponse(result);
         setState(prev => ({
           ...prev,
           isLoading: false,
-          error: 'Failed to open port. Check if port is occupied.',
+          error: cleanResponse
+            ? `Failed to open port. Controller response: ${cleanResponse}`
+            : 'Failed to open port. Check if port is occupied.',
         }));
       }
     } catch (error) {
@@ -230,13 +309,15 @@ function ControlPanel() {
       }));
 
       // Sync state to MCP
-      if (window.electronAPI?.syncArmState) {
-        await window.electronAPI.syncArmState({
-          isConnected: false,
-          resourceHandle: 0,
-          comPort: state.comPort,
-        });
-      }
+      await syncArmStateToMain({
+        isConnected: false,
+        resourceHandle: 0,
+        serverIP: state.serverIP,
+        comPort: state.comPort,
+        currentX: 0,
+        currentY: 0,
+        zDepth: state.zDepth,
+      });
     } catch (error) {
       setState(prev => ({
         ...prev,
@@ -249,13 +330,15 @@ function ControlPanel() {
       }));
 
       // Sync state to MCP
-      if (window.electronAPI?.syncArmState) {
-        await window.electronAPI.syncArmState({
-          isConnected: false,
-          resourceHandle: 0,
-          comPort: state.comPort,
-        });
-      }
+      await syncArmStateToMain({
+        isConnected: false,
+        resourceHandle: 0,
+        serverIP: state.serverIP,
+        comPort: state.comPort,
+        currentX: 0,
+        currentY: 0,
+        zDepth: state.zDepth,
+      });
     }
   };
 
@@ -309,6 +392,10 @@ function ControlPanel() {
         currentY: newY,
         isLoading: false,
       }));
+      await syncArmStateToMain({
+        currentX: newX,
+        currentY: newY,
+      });
     } catch (error) {
       addLog('错误', `移动失败: ${error instanceof Error ? error.message : 'Unknown'}`);
       setState(prev => ({
@@ -344,6 +431,9 @@ function ControlPanel() {
       });
       
       addLog('点击', `位置 (${state.currentX},${state.currentY}) 深度 Z${state.zDepth}`);
+      await syncArmStateToMain({
+        zDepth: state.zDepth,
+      });
       
       setState(prev => ({ ...prev, isLoading: false }));
     } catch (error) {

@@ -70,6 +70,23 @@ export interface MnemonicOcrRequest {
   requireBip39?: boolean;
 }
 
+export interface MnemonicStoreMetadata {
+  capturedAt?: string;
+  wordCount?: number;
+  source?: string;
+}
+
+export interface StructuredMnemonicStoreState {
+  words: string[];
+  shares?: string[][];
+  shareCount?: number;
+  threshold?: number;
+  sequenceId?: string;
+  walletType?: 'bip39' | 'slip39';
+  flowType?: 'create' | 'import' | 'manual';
+  metadata: MnemonicStoreMetadata;
+}
+
 /** Verify-page OCR result from renderer */
 export interface VerifyOcrResult {
   success: boolean;
@@ -109,15 +126,11 @@ let mcpLogCallback: McpLogCallback | null = null;
 /** Global stop flag for interrupting sequences */
 let shouldStopSequence = false;
 
-/** Stored mnemonic words from OCR recognition */
-let storedMnemonicWords: string[] = [];
-
-/** Mnemonic storage metadata */
-let mnemonicMetadata: {
-  capturedAt?: string;
-  wordCount?: number;
-  source?: string;
-} = {};
+/** Structured mnemonic storage shared with MCP tools */
+let mnemonicStoreState: StructuredMnemonicStoreState = {
+  words: [],
+  metadata: {},
+};
 
 /**
  * Gets the current arm state.
@@ -291,20 +304,58 @@ export function shouldStopSequenceExecution(): boolean {
  * @param source - Source of the mnemonic (e.g., 'ocr', 'manual')
  */
 export function storeMnemonicWords(words: string[], source: string = 'ocr'): void {
-  storedMnemonicWords = [...words];
-  mnemonicMetadata = {
-    capturedAt: new Date().toISOString(),
-    wordCount: words.length,
-    source,
+  mnemonicStoreState = {
+    words: [...words],
+    metadata: {
+      capturedAt: new Date().toISOString(),
+      wordCount: words.length,
+      source,
+    },
   };
   console.log(`[MCP] Stored ${words.length} mnemonic words from ${source}`);
+}
+
+export function storeStructuredMnemonicState(
+  input: Omit<StructuredMnemonicStoreState, 'metadata'>,
+  source: string = 'ocr'
+): void {
+  mnemonicStoreState = {
+    words: [...input.words],
+    shares: input.shares?.map((share) => [...share]),
+    shareCount: input.shareCount,
+    threshold: input.threshold,
+    sequenceId: input.sequenceId,
+    walletType: input.walletType,
+    flowType: input.flowType,
+    metadata: {
+      capturedAt: new Date().toISOString(),
+      wordCount: input.words.length,
+      source,
+    },
+  };
+  console.log(
+    `[MCP] Stored structured mnemonic state: ${input.walletType || 'unknown'} ${input.flowType || 'unknown'}`
+  );
 }
 
 /**
  * Gets the stored mnemonic words.
  */
 export function getStoredMnemonicWords(): string[] {
-  return [...storedMnemonicWords];
+  return [...mnemonicStoreState.words];
+}
+
+export function getStoredMnemonicState(): StructuredMnemonicStoreState {
+  return {
+    words: [...mnemonicStoreState.words],
+    shares: mnemonicStoreState.shares?.map((share) => [...share]),
+    shareCount: mnemonicStoreState.shareCount,
+    threshold: mnemonicStoreState.threshold,
+    sequenceId: mnemonicStoreState.sequenceId,
+    walletType: mnemonicStoreState.walletType,
+    flowType: mnemonicStoreState.flowType,
+    metadata: { ...mnemonicStoreState.metadata },
+  };
 }
 
 /**
@@ -312,25 +363,27 @@ export function getStoredMnemonicWords(): string[] {
  * @param index - 1-based index of the word
  */
 export function getMnemonicWordByIndex(index: number): string | null {
-  if (index < 1 || index > storedMnemonicWords.length) {
+  if (index < 1 || index > mnemonicStoreState.words.length) {
     return null;
   }
-  return storedMnemonicWords[index - 1];
+  return mnemonicStoreState.words[index - 1];
 }
 
 /**
  * Gets mnemonic storage metadata.
  */
-export function getMnemonicMetadata(): typeof mnemonicMetadata {
-  return { ...mnemonicMetadata };
+export function getMnemonicMetadata(): MnemonicStoreMetadata {
+  return { ...mnemonicStoreState.metadata };
 }
 
 /**
  * Clears stored mnemonic words.
  */
 export function clearMnemonicWords(): void {
-  storedMnemonicWords = [];
-  mnemonicMetadata = {};
+  mnemonicStoreState = {
+    words: [],
+    metadata: {},
+  };
   console.log('[MCP] Cleared stored mnemonic words');
 }
 
@@ -338,5 +391,5 @@ export function clearMnemonicWords(): void {
  * Checks if mnemonic words are stored.
  */
 export function hasMnemonicWords(): boolean {
-  return storedMnemonicWords.length > 0;
+  return mnemonicStoreState.words.length > 0;
 }
