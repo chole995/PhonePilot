@@ -280,6 +280,9 @@ def decode_ctc(logits: np.ndarray, charset: Sequence[str]) -> Tuple[str, float]:
   return text, score
 
 
+CROP_PAD = 6  # pixels of padding around each detected text box before recognition
+
+
 def recognize_crop(
   image_bgr: np.ndarray,
   box: Tuple[int, int, int, int],
@@ -290,10 +293,10 @@ def recognize_crop(
 ) -> Tuple[str, float]:
   x, y, w, h = box
   h_img, w_img = image_bgr.shape[:2]
-  x1 = max(0, x - 2)
-  y1 = max(0, y - 2)
-  x2 = min(w_img, x + w + 2)
-  y2 = min(h_img, y + h + 2)
+  x1 = max(0, x - CROP_PAD)
+  y1 = max(0, y - CROP_PAD)
+  x2 = min(w_img, x + w + CROP_PAD)
+  y2 = min(h_img, y + h + CROP_PAD)
   crop = image_bgr[y1:y2, x1:x2]
   arr = preprocess_rec_input(crop)
   input_handle.reshape(arr.shape)
@@ -548,6 +551,10 @@ def merge_boxes(items: Sequence[Tuple[int, int, int, int]]) -> Optional[Tuple[in
   return (x1, y1, x2 - x1, y2 - y1)
 
 
+# Supported mnemonic grid layouts: word_count → row_count
+MNEMONIC_GRID_WORD_COUNTS = {12: 6, 18: 9, 20: 10, 24: 12}
+
+
 def recognize_mnemonic_grid(
   image_bgr: np.ndarray,
   rows: Sequence[Dict[str, Any]],
@@ -555,13 +562,18 @@ def recognize_mnemonic_grid(
   input_handle: Any,
   output_handle: Any,
   charset: Sequence[str],
+  num_rows: int = 6,
 ) -> Optional[Tuple[str, float]]:
+  """Recognize a 2-column mnemonic grid with `num_rows` rows (num_rows*2 words total).
+
+  Supports 6 rows (12 words), 9 rows (18 words), 10 rows (20 words), 12 rows (24 words).
+  """
   dense_rows = [row for row in rows if len(row["items"]) >= 2]
-  if len(dense_rows) < 5:
+  if len(dense_rows) < num_rows - 1:
     return None
-  if len(dense_rows) >= 6:
-    dense_rows = dense_rows[-6:]
-  if len(dense_rows) != 6:
+  if len(dense_rows) >= num_rows:
+    dense_rows = dense_rows[-num_rows:]
+  if len(dense_rows) != num_rows:
     return None
 
   image_w = image_bgr.shape[1]
@@ -590,12 +602,13 @@ def recognize_mnemonic_grid(
       return None
 
     left_index = row_idx + 1
-    right_index = row_idx + 7
+    right_index = row_idx + num_rows + 1  # generalised: right column starts at num_rows+1
     lines.append(f"{left_index}. {left_token}")
     lines.append(f"{right_index}. {right_token}")
     confs.extend([left_conf, right_conf])
 
-  if len(lines) != 12:
+  expected_word_count = num_rows * 2
+  if len(lines) != expected_word_count:
     return None
 
   avg_conf = float(statistics.mean(confs)) * 100.0 if confs else 0.0
@@ -714,14 +727,25 @@ def infer_once(payload: Dict[str, Any]) -> Dict[str, Any]:
   mode = "generic-lines"
 
   mnemonic_result = None
-  should_try_mnemonic_grid = expected_word_count in {0, 12}
+  should_try_mnemonic_grid = expected_word_count in MNEMONIC_GRID_WORD_COUNTS or expected_word_count == 0
   if should_try_mnemonic_grid and (mnemonic_layout or len(rows) >= 5):
-    mnemonic_result = recognize_mnemonic_grid(
-      image_bgr, rows, predictor, input_handle, output_handle, charset
-    )
+    if expected_word_count in MNEMONIC_GRID_WORD_COUNTS:
+      # Known word count: try the exact grid layout.
+      num_rows = MNEMONIC_GRID_WORD_COUNTS[expected_word_count]
+      mnemonic_result = recognize_mnemonic_grid(
+        image_bgr, rows, predictor, input_handle, output_handle, charset, num_rows=num_rows
+      )
+    else:
+      # Unknown word count: try all supported layouts in ascending order.
+      for num_rows in sorted(MNEMONIC_GRID_WORD_COUNTS.values()):
+        mnemonic_result = recognize_mnemonic_grid(
+          image_bgr, rows, predictor, input_handle, output_handle, charset, num_rows=num_rows
+        )
+        if mnemonic_result is not None:
+          break
 
-    # Some tightly-cropped mnemonic frames place row 1/7 very close to the top.
-    # Retry with relaxed masking to avoid dropping the first row.
+    # Some tightly-cropped mnemonic frames place the first row very close to the top.
+    # Retry with relaxed masking to avoid dropping it.
     if mnemonic_result is None and mnemonic_layout:
       retry_boxes = detect_text_boxes(
         image_bgr,
@@ -729,8 +753,14 @@ def infer_once(payload: Dict[str, Any]) -> Dict[str, Any]:
         mask_bottom_ratio=1.0,
       )
       retry_rows = cluster_rows(retry_boxes, image_bgr.shape[0])
+      retry_num_rows = (
+        MNEMONIC_GRID_WORD_COUNTS[expected_word_count]
+        if expected_word_count in MNEMONIC_GRID_WORD_COUNTS
+        else 6
+      )
       retry_result = recognize_mnemonic_grid(
-        image_bgr, retry_rows, predictor, input_handle, output_handle, charset
+        image_bgr, retry_rows, predictor, input_handle, output_handle, charset,
+        num_rows=retry_num_rows,
       )
       if retry_result is not None:
         boxes = retry_boxes
