@@ -70,7 +70,7 @@ export interface PageAction {
 export const LETTER_COORDS: Record<string, { x: number; y: number }> = {
   q: { x: 17, y: 73 }, w: { x: 24, y: 74 }, e: { x: 28, y: 74 }, r: { x: 33, y: 74 },
   t: { x: 37, y: 74 }, y: { x: 41, y: 74 }, u: { x: 45, y: 74 }, i: { x: 50, y: 74 },
-  o: { x: 55, y: 74 }, p: { x: 59, y: 74 },
+  o: { x: 55, y: 73 }, p: { x: 59, y: 74 },
   a: { x: 19, y: 80 }, s: { x: 25, y: 80 }, d: { x: 29, y: 80 }, f: { x: 34, y: 80 },
   g: { x: 39, y: 80 }, h: { x: 43, y: 80 }, j: { x: 49, y: 80 }, k: { x: 54, y: 80 },
   l: { x: 59, y: 80 },
