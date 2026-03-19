@@ -116,6 +116,8 @@ export const DEVICE_BUTTONS = {
 export const STEP_DELAY_AFTER_LETTER_MS = 700;
 /** Delay (ms) after each word confirm tap to leave a small gap before the next word. */
 export const STEP_DELAY_AFTER_CONFIRM_MS = 1200;
+/** Delay (ms) after the LAST word confirm — device needs time to validate the full mnemonic. */
+export const STEP_DELAY_AFTER_LAST_CONFIRM_MS = 5000;
 
 /**
  * Generates AutoStep array from a list of words.
@@ -124,6 +126,7 @@ export const STEP_DELAY_AFTER_CONFIRM_MS = 1200;
 export function generateWordSteps(words: string[]): AutoStep[] {
   const steps: AutoStep[] = [];
   words.forEach((word, wordIndex) => {
+    const isLastWord = wordIndex === words.length - 1;
     const lowerWord = word.toLowerCase();
     for (let i = 0; i < lowerWord.length; i++) {
       const letter = lowerWord[i];
@@ -143,7 +146,7 @@ export function generateWordSteps(words: string[]): AutoStep[] {
       x: CONFIRM_COORD.x,
       y: CONFIRM_COORD.y,
       depth: 12,
-      delayAfter: STEP_DELAY_AFTER_CONFIRM_MS,
+      delayAfter: isLastWord ? STEP_DELAY_AFTER_LAST_CONFIRM_MS : STEP_DELAY_AFTER_CONFIRM_MS,
     });
   });
   return steps;
@@ -162,9 +165,14 @@ export function generateSlip39ShareSteps(shares: string[][]): AutoStep[] {
   const steps: AutoStep[] = [];
   let globalWordIndex = 0;
 
+  const isLastShare = (shareIndex: number) => shareIndex === shares.length - 1;
+  const isLastWordInShare = (wordInShareIndex: number, shareWords: string[]) =>
+    wordInShareIndex === shareWords.length - 1;
+
   shares.forEach((shareWords, shareIndex) => {
     shareWords.forEach((word, wordInShareIndex) => {
       globalWordIndex += 1;
+      const isLastWord = isLastShare(shareIndex) && isLastWordInShare(wordInShareIndex, shareWords);
       const lowerWord = word.toLowerCase();
       for (let i = 0; i < lowerWord.length; i++) {
         const letter = lowerWord[i];
@@ -185,7 +193,7 @@ export function generateSlip39ShareSteps(shares: string[][]): AutoStep[] {
         x: CONFIRM_COORD.x,
         y: CONFIRM_COORD.y,
         depth: 12,
-        delayAfter: STEP_DELAY_AFTER_CONFIRM_MS,
+        delayAfter: isLastWord ? STEP_DELAY_AFTER_LAST_CONFIRM_MS : STEP_DELAY_AFTER_CONFIRM_MS,
       });
     });
 
@@ -971,7 +979,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '完成流程(慢速)',
     group: '完成',
     steps: [
-      { label: '点击继续', x: 55, y: 85, depth: 12, delayBefore: 5000, delayAfter: 2000 },
+      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 2000 },
       { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 2000 },
       { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 3000 },
       { label: '复位', x: 0, y: 0, depth: 12 },
