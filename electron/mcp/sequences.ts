@@ -115,7 +115,7 @@ export const DEVICE_BUTTONS = {
 /** Delay (ms) after each letter tap when typing mnemonic words. */
 export const STEP_DELAY_AFTER_LETTER_MS = 700;
 /** Delay (ms) after each word confirm tap to leave a small gap before the next word. */
-export const STEP_DELAY_AFTER_CONFIRM_MS = 700;
+export const STEP_DELAY_AFTER_CONFIRM_MS = 1200;
 
 /**
  * Generates AutoStep array from a list of words.
@@ -971,9 +971,9 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '完成流程(慢速)',
     group: '完成',
     steps: [
-      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 1200 },
-      { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 1200 },
-      { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 2500 },
+      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 2000 },
+      { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 2000 },
+      { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 3000 },
       { label: '复位', x: 0, y: 0, depth: 12 },
     ],
   },
@@ -998,7 +998,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: 'Settings app', x: 50, y: 65, depth: 12 },
       { label: 'Wallet section', x: 50, y: 55, depth: 12 },
       // Swipe up
-      { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 } },
+      { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 55 }, swipeHoldDelay: 200, delayAfter: 800 },
       // Double click
       { label: 'Click 1', x: 50, y: 85, depth: 12 },
       { label: 'Click 2', x: 50, y: 85, depth: 12 },
@@ -1335,19 +1335,19 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'count20_one_normal',
     name: 'slip39-20词-1份',
     category: 'SLIP39 20词',
-    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-1', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-1', 'suffix-finish-paced'],
   },
   {
     id: 'count20_two_normal',
     name: 'slip39-20词-2/3',
     category: 'SLIP39 20词',
-    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-2-all', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-2-all', 'suffix-finish-paced'],
   },
   {
     id: 'count20_three_normal',
     name: 'slip39-20词-16/16',
     category: 'SLIP39 20词',
-    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-16-all', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-20-words', 'input-slip39-20-16-all', 'suffix-finish-paced'],
   },
 
   // ============================================================================
@@ -1357,13 +1357,13 @@ const ALL_SEQUENCES: AutoSequence[] = [
     id: 'count33_one_normal',
     name: 'slip39-33词-1份',
     category: 'SLIP39 33词',
-    actions: [...IMPORT_PREFIX, 'select-33-words', 'input-slip39-33-1', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-33-words', 'input-slip39-33-1', 'suffix-finish-paced'],
   },
   {
     id: 'count33_two_normal',
     name: 'slip39-33词-3/2',
     category: 'SLIP39 33词',
-    actions: [...IMPORT_PREFIX, 'select-33-words', 'input-slip39-33-2-all', 'suffix-finish'],
+    actions: [...IMPORT_PREFIX, 'select-33-words', 'input-slip39-33-2-all', 'suffix-finish-paced'],
   },
 ];
 

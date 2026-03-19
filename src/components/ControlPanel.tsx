@@ -20,6 +20,7 @@ import {
   getSequencesByCategory,
   type AutoSequence,
 } from '../../electron/mcp/sequences';
+import { executeClickStep, executeSwipeStep } from '../../electron/mcp/utils/executeStep';
 
 // Get all sequences from the shared definition
 const OPERATION_SEQUENCES: AutoSequence[] = getAllSequenceIds()
@@ -471,6 +472,12 @@ function ControlPanel() {
     setState(prev => ({ ...prev, isAutoRunning: true, autoProgress: 0, error: null, capturedWords: [] }));
     addLog('自动', `开始执行自动操作序列: ${sequence.name}`);
 
+    // Shared send helper and config for the step executor utilities
+    const send = async (daima: string) => {
+      await sendCommand({ duankou: '0', hco: state.resourceHandle, daima });
+    };
+    const stepConfig = { clickDelay: ARM_CONTROLLER_CONFIG.clickDelay, zUp: ARM_CONTROLLER_CONFIG.zUp };
+
     try {
       for (let i = 0; i < steps.length; i++) {
         // Check if operation was cancelled
@@ -487,11 +494,7 @@ function ControlPanel() {
           addLog('验证', `开始第 ${verifyRound}/${totalVerifySteps} 次确认题 OCR`);
 
           // Verification OCR step: move arm, OCR to detect word index, click correct option
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${step.x}Y${step.y}`,
-          });
+          await send(`X${step.x}Y${step.y}`);
 
           addLog('自动', `${step.label} - 移动到 (${step.x},${step.y})，等待验证OCR...`);
 
@@ -550,37 +553,18 @@ function ControlPanel() {
             addLog('验证', `匹配选项: ${verifyResult.matchedOptions.join(', ')}`);
           }
 
-          // Click the correct option: move to position -> lower stylus -> raise stylus
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${option.x}Y${option.y}`,
-          });
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${option.depth}`,
-          });
-
+          // Click the correct option using shared step logic
+          await send(`X${option.x}Y${option.y}`);
+          await send(`Z${option.depth}`);
           await delay(ARM_CONTROLLER_CONFIG.clickDelay);
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
-          });
+          await send(`Z${ARM_CONTROLLER_CONFIG.zUp}`);
 
           finishedVerifySteps += 1;
           addLog('验证', `第 ${verifyRound}/${totalVerifySteps} 题已点击选项${verifyResult.optionIndex + 1} (${option.x},${option.y})`);
         } else if (step.ocrCapture) {
           const ocrCaptureConfig = typeof step.ocrCapture === 'object' ? step.ocrCapture : {};
           // OCR capture step: move arm out of the way (no click), then trigger OCR
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${step.x}Y${step.y}`,
-          });
+          await send(`X${step.x}Y${step.y}`);
 
           addLog('自动', `${step.label} - 移动到 (${step.x},${step.y})，等待OCR识别...`);
 
@@ -621,59 +605,12 @@ function ControlPanel() {
             throw new Error(`助记词OCR失败: ${ocrResult.reason || 'no words recognized'}`);
           }
         } else if (step.swipeTo) {
-          // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${step.x}Y${step.y}`,
-          });
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${step.depth}`,
-          });
-
-          await delay(50);
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${step.swipeTo.x}Y${step.swipeTo.y}`,
-          });
-
-          // Wait before raising stylus (use custom hold delay or default 50ms)
-          await delay(step.swipeHoldDelay ?? 50);
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
-          });
-
+          // Swipe: shared utility (consistent with MCP)
+          await executeSwipeStep(step as typeof step & { swipeTo: { x: number; y: number } }, send, delay, stepConfig);
           addLog('自动', `${step.label} (${step.x},${step.y}) → (${step.swipeTo.x},${step.swipeTo.y})`);
         } else {
-          // Click operation: move to position -> lower stylus -> raise stylus
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `X${step.x}Y${step.y}`,
-          });
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${step.depth}`,
-          });
-
-          await delay(ARM_CONTROLLER_CONFIG.clickDelay);
-
-          await sendCommand({
-            duankou: '0',
-            hco: state.resourceHandle,
-            daima: `Z${ARM_CONTROLLER_CONFIG.zUp}`,
-          });
-
+          // Click: shared utility (consistent with MCP)
+          await executeClickStep(step, send, delay, stepConfig);
           addLog('自动', `${step.label} (${step.x},${step.y})`);
         }
 

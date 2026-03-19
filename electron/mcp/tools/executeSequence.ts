@@ -23,6 +23,7 @@ import {
 } from '../state';
 import { getSequence, getPageAction, getAllSequenceIds } from '../sequences';
 import { saveCaptureToDownloads } from '../../saveCapture';
+import { executeClickStep, executeSwipeStep } from '../utils/executeStep';
 
 import type { AutoStep } from '../sequences';
 
@@ -72,21 +73,17 @@ async function executeStep(
     await delay(step.delayBefore ?? 0);
   }
 
+  // Shared send helper: wraps ARM URL building so shared utilities can call it
+  const send = async (daima: string) => {
+    await httpRequest(buildArmApiUrl({ duankou: '0', hco: resourceHandle, daima }));
+  };
+  const stepConfig = { clickDelay: ARM_CONFIG.clickDelay, zUp: ARM_CONFIG.zUp };
+
   if (step.ocrCapture) {
     const ocrCaptureConfig = typeof step.ocrCapture === 'object' ? step.ocrCapture : {};
     // OCR capture step: move arm out of the way without clicking
-    const moveUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${step.x}Y${step.y}`,
-    });
-    await httpRequest(moveUrl);
-
-    // Update position
-    updateArmState({
-      currentX: step.x,
-      currentY: step.y,
-    });
+    await send(`X${step.x}Y${step.y}`);
+    updateArmState({ currentX: step.x, currentY: step.y });
 
     // Wait for arm to settle, then run OCR capture in renderer.
     await delay(1000);
@@ -117,17 +114,8 @@ async function executeStep(
     }
   } else if (step.ocrVerify) {
     // Verification step: move to observation position, run verify OCR, then click chosen option.
-    const moveUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${step.x}Y${step.y}`,
-    });
-    await httpRequest(moveUrl);
-
-    updateArmState({
-      currentX: step.x,
-      currentY: step.y,
-    });
+    await send(`X${step.x}Y${step.y}`);
+    updateArmState({ currentX: step.x, currentY: step.y });
 
     await delay(1000);
 
@@ -148,34 +136,12 @@ async function executeStep(
     }
 
     const option = step.ocrVerify.options[verifyResult.optionIndex];
-
-    const moveToOptionUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${option.x}Y${option.y}`,
-    });
-    await httpRequest(moveToOptionUrl);
-
-    const lowerUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${option.depth}`,
-    });
-    await httpRequest(lowerUrl);
-
+    // Click the correct option using shared click logic
+    await send(`X${option.x}Y${option.y}`);
+    await send(`Z${option.depth}`);
     await delay(ARM_CONFIG.clickDelay);
-
-    const raiseUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${ARM_CONFIG.zUp}`,
-    });
-    await httpRequest(raiseUrl);
-
-    updateArmState({
-      currentX: option.x,
-      currentY: option.y,
-    });
+    await send(`Z${ARM_CONFIG.zUp}`);
+    updateArmState({ currentX: option.x, currentY: option.y });
 
     console.log(
       `[execute-sequence] Verify word #${verifyResult.wordIndex}: option ${verifyResult.optionIndex + 1}, correct=${verifyResult.correctWord}`
@@ -193,94 +159,13 @@ async function executeStep(
       console.log('[execute-sequence] Verify mapped options:', verifyResult.matchedOptions.join(', '));
     }
   } else if (step.swipeTo) {
-    // Swipe operation: move to start -> lower stylus -> move to end -> raise stylus
-    const moveToStartUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${step.x}Y${step.y}`,
-    });
-    await httpRequest(moveToStartUrl);
-
-    const lowerUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${step.depth}`,
-    });
-    await httpRequest(lowerUrl);
-
-    await delay(50);
-
-    const segmentCount = Math.max(1, Math.floor(step.swipeSegments ?? 1));
-    const segmentDelay = Math.max(0, Math.floor(step.swipeSegmentDelay ?? 0));
-    if (segmentCount === 1) {
-      const swipeUrl = buildArmApiUrl({
-        duankou: '0',
-        hco: resourceHandle,
-        daima: `X${step.swipeTo.x}Y${step.swipeTo.y}`,
-      });
-      await httpRequest(swipeUrl);
-    } else {
-      for (let i = 1; i <= segmentCount; i++) {
-        const t = i / segmentCount;
-        const nextX = Math.round(step.x + (step.swipeTo.x - step.x) * t);
-        const nextY = Math.round(step.y + (step.swipeTo.y - step.y) * t);
-        const swipeSegmentUrl = buildArmApiUrl({
-          duankou: '0',
-          hco: resourceHandle,
-          daima: `X${nextX}Y${nextY}`,
-        });
-        await httpRequest(swipeSegmentUrl);
-        if (segmentDelay > 0 && i < segmentCount) {
-          await delay(segmentDelay);
-        }
-      }
-    }
-
-    // Wait before raising stylus
-    await delay(step.swipeHoldDelay ?? 50);
-
-    const raiseUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${ARM_CONFIG.zUp}`,
-    });
-    await httpRequest(raiseUrl);
-
-    // Update position
-    updateArmState({
-      currentX: step.swipeTo.x,
-      currentY: step.swipeTo.y,
-    });
+    // Swipe: shared utility (single direct command, consistent with client UI)
+    await executeSwipeStep(step as AutoStep & { swipeTo: { x: number; y: number } }, send, delay, stepConfig);
+    updateArmState({ currentX: step.swipeTo.x, currentY: step.swipeTo.y });
   } else {
-    // Click operation: move to position -> lower stylus -> raise stylus
-    const moveUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `X${step.x}Y${step.y}`,
-    });
-    await httpRequest(moveUrl);
-
-    const lowerUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${step.depth}`,
-    });
-    await httpRequest(lowerUrl);
-
-    await delay(ARM_CONFIG.clickDelay);
-
-    const raiseUrl = buildArmApiUrl({
-      duankou: '0',
-      hco: resourceHandle,
-      daima: `Z${ARM_CONFIG.zUp}`,
-    });
-    await httpRequest(raiseUrl);
-
-    // Update position
-    updateArmState({
-      currentX: step.x,
-      currentY: step.y,
-    });
+    // Click: shared utility (consistent with client UI)
+    await executeClickStep(step, send, delay, stepConfig);
+    updateArmState({ currentX: step.x, currentY: step.y });
   }
 
   // Wait after step (default 250ms for faster sequence execution)
@@ -318,13 +203,26 @@ export async function executeExecuteSequence(
     };
   }
 
-  const totalSteps = sequence.actions.reduce((sum, actionId) => {
+  // Pre-build all action steps once so that:
+  // 1. totalSteps count and actual execution use the SAME resolved steps
+  // 2. Actions with buildSteps (e.g. random share selection) are only evaluated once
+  const resolvedActions: Array<{ action: NonNullable<ReturnType<typeof getPageAction>>; steps: AutoStep[] }> = [];
+  for (const actionId of sequence.actions) {
     const action = getPageAction(actionId);
     if (!action) {
-      return sum;
+      return {
+        output: {
+          success: false,
+          message: `Unknown page action ID: ${actionId}`,
+          sequenceId: sequence.id,
+          sequenceName: sequence.name,
+        },
+        frame: null,
+      };
     }
-    return sum + (action.buildSteps ? action.buildSteps().length : action.steps.length);
-  }, 0);
+    resolvedActions.push({ action, steps: action.buildSteps ? action.buildSteps() : action.steps });
+  }
+  const totalSteps = resolvedActions.reduce((sum, { steps }) => sum + steps.length, 0);
   let stepsCompleted = 0;
   const slip39CreateConfig = SLIP39_CREATE_SEQUENCE_CONFIG[sequence.id];
   const capturedShares: string[][] = [];
@@ -334,13 +232,8 @@ export async function executeExecuteSequence(
   clearMnemonicWords();
 
   try {
-    for (const actionId of sequence.actions) {
-      const action = getPageAction(actionId);
-      if (!action) {
-        throw new Error(`Unknown page action ID: ${actionId}`);
-      }
-
-      const actionSteps = action.buildSteps ? action.buildSteps() : action.steps;
+    for (const { action, steps: actionSteps } of resolvedActions) {
+      // action and actionSteps already resolved above
 
       for (const step of actionSteps) {
         if (shouldStopSequenceExecution()) {
