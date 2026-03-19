@@ -207,26 +207,51 @@ function ControlPanel() {
 
       let resourceHandle = parseResourceHandle(result);
 
-      if (resourceHandle <= 0 && window.electronAPI?.tryRecoverArmConnection) {
-        const recovery = await window.electronAPI.tryRecoverArmConnection({
-          serverIP: state.serverIP,
-          comPort: state.comPort,
-        });
+      if (resourceHandle <= 0) {
+        // --- Recovery path 1: Electron IPC (when available) ---
+        if (window.electronAPI?.tryRecoverArmConnection) {
+          const recovery = await window.electronAPI.tryRecoverArmConnection({
+            serverIP: state.serverIP,
+            comPort: state.comPort,
+          });
 
-        addLog(
-          '连接',
-          recovery.attempted
-            ? `检测到可能存在旧连接，已尝试自动释放 ${state.comPort}`
-            : `连接失败后未执行自动恢复：${recovery.reason}`
-        );
+          addLog(
+            '连接',
+            recovery.attempted
+              ? `检测到可能存在旧连接，已尝试自动释放 ${state.comPort}`
+              : `连接失败后未执行自动恢复：${recovery.reason}`
+          );
 
-        if (recovery.attempted) {
+          if (recovery.attempted) {
+            result = await sendCommand({
+              duankou: state.comPort,
+              hco: 0,
+              daima: '0',
+            });
+            resourceHandle = parseResourceHandle(result);
+          }
+        }
+
+        // --- Recovery path 2: HTTP-level close of common handles (works without Electron) ---
+        if (resourceHandle <= 0) {
+          addLog('连接', `端口占用，尝试释放旧句柄后重连 ${state.comPort}...`);
+          for (let h = 1; h <= 3; h++) {
+            try {
+              await sendCommand({ duankou: '0', hco: h, daima: '0' });
+            } catch {
+              // ignore — handle may not exist
+            }
+          }
+          await delay(500);
           result = await sendCommand({
             duankou: state.comPort,
             hco: 0,
             daima: '0',
           });
           resourceHandle = parseResourceHandle(result);
+          if (resourceHandle > 0) {
+            addLog('连接', `重连成功，句柄: ${resourceHandle}`);
+          }
         }
       }
 

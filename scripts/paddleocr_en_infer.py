@@ -280,7 +280,9 @@ def decode_ctc(logits: np.ndarray, charset: Sequence[str]) -> Tuple[str, float]:
   return text, score
 
 
-CROP_PAD = 6  # pixels of padding around each detected text box before recognition
+CROP_PAD_X_LEFT = 2   # left padding (small — number labels sit here)
+CROP_PAD_X_RIGHT = 8  # right padding (larger — trailing chars are most often clipped here)
+CROP_PAD_Y = 2        # vertical padding (small — avoids row bleed in dense 24-word grids)
 
 
 def recognize_crop(
@@ -293,10 +295,10 @@ def recognize_crop(
 ) -> Tuple[str, float]:
   x, y, w, h = box
   h_img, w_img = image_bgr.shape[:2]
-  x1 = max(0, x - CROP_PAD)
-  y1 = max(0, y - CROP_PAD)
-  x2 = min(w_img, x + w + CROP_PAD)
-  y2 = min(h_img, y + h + CROP_PAD)
+  x1 = max(0, x - CROP_PAD_X_LEFT)
+  y1 = max(0, y - CROP_PAD_Y)
+  x2 = min(w_img, x + w + CROP_PAD_X_RIGHT)
+  y2 = min(h_img, y + h + CROP_PAD_Y)
   crop = image_bgr[y1:y2, x1:x2]
   arr = preprocess_rec_input(crop)
   input_handle.reshape(arr.shape)

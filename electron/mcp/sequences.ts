@@ -1007,9 +1007,9 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       { label: 'Wallet section', x: 50, y: 55, depth: 12 },
       // Swipe up — use x=50 (center) to stay in scrollable area, slow segmented for stability
       { label: 'Swipe up', x: 50, y: 82, depth: 12, swipeTo: { x: 50, y: 38 }, swipeSegments: 8, swipeSegmentDelay: 80, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1400 },
-      // Double click
-      { label: 'Click 1', x: 50, y: 85, depth: 12 },
-      { label: 'Click 2', x: 50, y: 85, depth: 12 },
+      // Double click — add delay so UI has time to react after each tap
+      { label: 'Click 1', x: 50, y: 85, depth: 12, delayAfter: 800 },
+      { label: 'Click 2', x: 50, y: 85, depth: 12, delayAfter: 800 },
       // Settings navigation
       { label: 'Setting 1', x: 25, y: 44, depth: 12, delayAfter: 600 },
       { label: 'Setting 2', x: 25, y: 55, depth: 12, delayAfter: 900 },
@@ -1037,11 +1037,11 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     group: '设备管理',
     steps: [
       { label: 'Unlock swipe up', x: 50, y: 82, depth: 12, swipeTo: { x: 50, y: 38 }, swipeSegments: 8, swipeSegmentDelay: 80, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1800 },
-      { label: 'Settings app', x: 50, y: 65, depth: 12 },
-      { label: 'Wallet section', x: 50, y: 55, depth: 12 },
-      { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 } },
-      { label: 'Click 1', x: 50, y: 85, depth: 12 },
-      { label: 'Click 2', x: 50, y: 85, depth: 12 },
+      { label: 'Settings app', x: 50, y: 65, depth: 12, delayAfter: 600 },
+      { label: 'Wallet section', x: 50, y: 55, depth: 12, delayAfter: 600 },
+      { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 }, delayAfter: 1000 },
+      { label: 'Click 1', x: 50, y: 85, depth: 12, delayAfter: 800 },
+      { label: 'Click 2', x: 50, y: 85, depth: 12, delayAfter: 800 },
       { label: 'Setting 1', x: 25, y: 44, depth: 12, delayAfter: 600 },
       { label: 'Setting 2', x: 25, y: 55, depth: 12, delayAfter: 900 },
       {
