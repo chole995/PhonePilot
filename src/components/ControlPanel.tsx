@@ -232,30 +232,39 @@ function ControlPanel() {
           }
         }
 
-        // --- Recovery path 2: HTTP-level close of common handles (works without Electron) ---
+        // --- Recovery path 2: close last known handle from localStorage ---
         if (resourceHandle <= 0) {
-          addLog('连接', `端口占用，尝试释放旧句柄后重连 ${state.comPort}...`);
-          for (let h = 1; h <= 3; h++) {
+          const lastHandleKey = `arm_last_handle_${state.comPort}`;
+          const savedHandle = parseInt(localStorage.getItem(lastHandleKey) ?? '0', 10);
+          if (savedHandle > 0) {
+            addLog('连接', `端口占用，尝试关闭上次句柄 ${savedHandle} 后重连...`);
             try {
-              await sendCommand({ duankou: '0', hco: h, daima: '0' });
+              await sendCommand({ duankou: '0', hco: savedHandle, daima: '0' });
             } catch {
-              // ignore — handle may not exist
+              // ignore
             }
-          }
-          await delay(500);
-          result = await sendCommand({
-            duankou: state.comPort,
-            hco: 0,
-            daima: '0',
-          });
-          resourceHandle = parseResourceHandle(result);
-          if (resourceHandle > 0) {
-            addLog('连接', `重连成功，句柄: ${resourceHandle}`);
+            await delay(500);
+            result = await sendCommand({
+              duankou: state.comPort,
+              hco: 0,
+              daima: '0',
+            });
+            resourceHandle = parseResourceHandle(result);
+            if (resourceHandle > 0) {
+              addLog('连接', `重连成功，句柄: ${resourceHandle}`);
+            } else {
+              localStorage.removeItem(lastHandleKey);
+            }
+          } else {
+            addLog('连接', `端口占用，无上次句柄记录，请检查 ${state.comPort} 是否被其他程序占用`);
           }
         }
       }
 
       if (resourceHandle > 0) {
+        // Persist handle so recovery can close it on the next session
+        localStorage.setItem(`arm_last_handle_${state.comPort}`, resourceHandle.toString());
+
         setState(prev => ({
           ...prev,
           isConnected: true,
@@ -322,6 +331,9 @@ function ControlPanel() {
           hco: state.resourceHandle,
           daima: '0',
         });
+
+        // Port closed cleanly — remove saved handle so recovery won't re-use it
+        localStorage.removeItem(`arm_last_handle_${state.comPort}`);
       }
 
       setState(prev => ({
