@@ -1005,8 +1005,8 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
       // Enter settings
       { label: 'Settings app', x: 50, y: 65, depth: 12 },
       { label: 'Wallet section', x: 50, y: 55, depth: 12 },
-      // Swipe up (slow segmented, larger range, with before/after gaps)
-      { label: 'Swipe up', x: 35, y: 90, depth: 12, swipeTo: { x: 35, y: 40 }, swipeSegments: 8, swipeSegmentDelay: 60, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1200 },
+      // Swipe up — use x=50 (center) to stay in scrollable area, slow segmented for stability
+      { label: 'Swipe up', x: 50, y: 82, depth: 12, swipeTo: { x: 50, y: 38 }, swipeSegments: 8, swipeSegmentDelay: 80, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1400 },
       // Double click
       { label: 'Click 1', x: 50, y: 85, depth: 12 },
       { label: 'Click 2', x: 50, y: 85, depth: 12 },
@@ -1036,7 +1036,7 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '重置钱包流程(已解锁)',
     group: '设备管理',
     steps: [
-      { label: 'Unlock swipe up', x: 35, y: 90, depth: 12, swipeTo: { x: 35, y: 50 }, swipeSegments: 8, swipeSegmentDelay: 60, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1800 },
+      { label: 'Unlock swipe up', x: 50, y: 82, depth: 12, swipeTo: { x: 50, y: 38 }, swipeSegments: 8, swipeSegmentDelay: 80, swipeHoldDelay: 300, delayBefore: 500, delayAfter: 1800 },
       { label: 'Settings app', x: 50, y: 65, depth: 12 },
       { label: 'Wallet section', x: 50, y: 55, depth: 12 },
       { label: 'Swipe up', x: 35, y: 85, depth: 12, swipeTo: { x: 35, y: 70 } },
