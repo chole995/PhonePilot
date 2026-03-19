@@ -301,6 +301,11 @@ function levenshteinDistance(a: string, b: string): number {
 /**
  * Corrects an OCR word against the BIP39 English wordlist.
  * Returns the original word if it's already valid, or the closest BIP39 word.
+ *
+ * Tie-breaking: when two candidates have the same Levenshtein distance, prefer
+ * the one that the OCR word is a prefix of (e.g. "visua" → "visual" over "visa"),
+ * because OCR trailing-character truncation is far more common than mid-word
+ * substitution at equal edit distance.
  */
 function correctToBip39(ocrWord: string): { word: string; corrected: boolean } {
   if (bip39English.includes(ocrWord)) {
@@ -308,11 +313,14 @@ function correctToBip39(ocrWord: string): { word: string; corrected: boolean } {
   }
   let bestWord = ocrWord;
   let bestDist = Infinity;
+  let bestIsPrefix = false;
   for (const w of bip39English) {
     const dist = levenshteinDistance(ocrWord, w);
-    if (dist < bestDist) {
+    const isPrefix = w.startsWith(ocrWord);
+    if (dist < bestDist || (dist === bestDist && isPrefix && !bestIsPrefix)) {
       bestDist = dist;
       bestWord = w;
+      bestIsPrefix = isPrefix;
     }
     if (dist === 0) break; // exact match shortcut
   }
@@ -323,6 +331,9 @@ function correctToBip39(ocrWord: string): { word: string; corrected: boolean } {
 /**
  * Returns the top-N BIP39 candidate words for an OCR word, sorted by Levenshtein distance.
  * Used for BIP39-guided auto-correction when checksum validation fails.
+ *
+ * Tie-breaking: prefer candidates where the OCR word is a prefix (trailing truncation is
+ * a more common OCR error than mid-word substitution at equal edit distance).
  */
 function getBip39Candidates(ocrWord: string, topN: number = 5): { word: string; distance: number }[] {
   const candidates: { word: string; distance: number }[] = [];
@@ -332,7 +343,13 @@ function getBip39Candidates(ocrWord: string, topN: number = 5): { word: string; 
       candidates.push({ word: w, distance: dist });
     }
   }
-  candidates.sort((a, b) => a.distance - b.distance);
+  candidates.sort((a, b) => {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    // At equal distance, prefer the word that OCR input is a prefix of.
+    const aIsPrefix = a.word.startsWith(ocrWord) ? 0 : 1;
+    const bIsPrefix = b.word.startsWith(ocrWord) ? 0 : 1;
+    return aIsPrefix - bIsPrefix;
+  });
   return candidates.slice(0, topN);
 }
 
