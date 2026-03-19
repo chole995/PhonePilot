@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { createWorker, Worker, PSM } from 'tesseract.js';
 import { validateMnemonic } from '@scure/bip39';
 import { wordlist as bip39English } from '@scure/bip39/wordlists/english.js';
+import { slip39English } from '../slip39Wordlist';
 import {
   rotateVideoFrameToCanvas,
   cropToROI,
@@ -351,6 +352,78 @@ function getBip39Candidates(ocrWord: string, topN: number = 5): { word: string; 
     return aIsPrefix - bIsPrefix;
   });
   return candidates.slice(0, topN);
+}
+
+/**
+ * Corrects an OCR word against the SLIP39 English wordlist.
+ * Uses the same prefix-match tie-breaking as correctToBip39:
+ * when two candidates have equal Levenshtein distance, prefer the one
+ * that the OCR word is a prefix of (trailing-char truncation heuristic).
+ */
+function correctToSlip39(ocrWord: string): { word: string; corrected: boolean } {
+  if (slip39English.includes(ocrWord)) {
+    return { word: ocrWord, corrected: false };
+  }
+  let bestWord = ocrWord;
+  let bestDist = Infinity;
+  let bestIsPrefix = false;
+  for (const w of slip39English) {
+    const dist = levenshteinDistance(ocrWord, w);
+    const isPrefix = w.startsWith(ocrWord);
+    if (dist < bestDist || (dist === bestDist && isPrefix && !bestIsPrefix)) {
+      bestDist = dist;
+      bestWord = w;
+      bestIsPrefix = isPrefix;
+    }
+    if (dist === 0) break;
+  }
+  return { word: bestWord, corrected: bestDist > 0 && bestDist <= 2 };
+}
+
+/**
+ * Returns the top-N SLIP39 candidate words for an OCR word, sorted by Levenshtein distance.
+ * Tie-breaking: prefer candidates where the OCR word is a prefix.
+ */
+function getSlip39Candidates(ocrWord: string, topN: number = 5): { word: string; distance: number }[] {
+  const candidates: { word: string; distance: number }[] = [];
+  for (const w of slip39English) {
+    const dist = levenshteinDistance(ocrWord, w);
+    if (dist <= 3) {
+      candidates.push({ word: w, distance: dist });
+    }
+  }
+  candidates.sort((a, b) => {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    const aIsPrefix = a.word.startsWith(ocrWord) ? 0 : 1;
+    const bIsPrefix = b.word.startsWith(ocrWord) ? 0 : 1;
+    return aIsPrefix - bIsPrefix;
+  });
+  return candidates.slice(0, topN);
+}
+
+/**
+ * Attempts SLIP39 wordlist-guided auto-correction on mnemonic words.
+ * Tries top SLIP39 candidates for the lowest-confidence word.
+ * Returns true if a valid correction was found (mutates mnemonicWords in-place).
+ * Note: SLIP39 checksum validation (RS1024) is not performed here —
+ * single-word correction is applied conservatively (distance ≤ 1).
+ */
+function trySlip39AutoCorrect(mnemonicWords: MnemonicWord[]): boolean {
+  // Sort indices by confidence ascending (least confident first).
+  const sortedByConf = [...mnemonicWords].sort((a, b) => a.wordConfidence - b.wordConfidence);
+  for (const target of sortedByConf) {
+    if (slip39English.includes(target.word)) continue; // already valid
+    const candidates = getSlip39Candidates(target.word, 3);
+    if (candidates.length > 0 && candidates[0].distance <= 1) {
+      const idx = mnemonicWords.findIndex(w => w.index === target.index);
+      if (idx >= 0) {
+        console.log(`[SLIP39 AutoCorrect] Fixed word #${target.index}: "${target.word}" -> "${candidates[0].word}"`);
+        mnemonicWords[idx] = { ...mnemonicWords[idx], word: candidates[0].word, original: target.word };
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -1273,6 +1346,7 @@ function CameraPanel() {
       Math.min(24, Math.floor(options?.expectedWordCount ?? EXPECTED_MNEMONIC_COUNT))
     );
     const applyBip39Wordlist = options?.applyBip39Wordlist ?? true;
+    const applySlip39Wordlist = !applyBip39Wordlist; // SLIP39 flow uses its own wordlist
     const sceneCandidates = buildMnemonicSceneCandidates(sceneConfig, expectedWordCount);
 
     // Extract numbered mnemonic words.
@@ -1315,7 +1389,9 @@ function CameraPanel() {
       const normalizedWord = ocrWord.toLowerCase();
       const correction = applyBip39Wordlist
         ? correctToBip39(normalizedWord)
-        : { word: normalizedWord, corrected: false };
+        : applySlip39Wordlist
+          ? correctToSlip39(normalizedWord)
+          : { word: normalizedWord, corrected: false };
       const candidate: MnemonicWord = {
         index,
         word: correction.word,
@@ -1485,7 +1561,11 @@ function CameraPanel() {
             const existing = indexedWords.get(index);
             if (!existing) return;
             const normalized = entry.word.toLowerCase();
-            const expectedWord = applyBip39Wordlist ? correctToBip39(normalized).word : normalized;
+            const expectedWord = applyBip39Wordlist
+              ? correctToBip39(normalized).word
+              : applySlip39Wordlist
+                ? correctToSlip39(normalized).word
+                : normalized;
             if (existing.word === expectedWord) {
               score += 2;
             } else if (levenshteinDistance(existing.word, expectedWord) <= 1) {
@@ -1533,15 +1613,17 @@ function CameraPanel() {
 
     if (!bestSceneResult) return null;
 
-    // Last-resort fallback for 18/24: if indices are unreadable but OCR text has enough BIP39-like words,
-    // map sequentially so the flow can continue and surface concrete words for debugging.
-    if (applyBip39Wordlist && indexedWords.size === 0 && expectedWordCount >= 18) {
+    // Last-resort fallback for 18/24: if indices are unreadable but OCR text has enough wordlist-like
+    // words, map sequentially so the flow can continue and surface concrete words for debugging.
+    if ((applyBip39Wordlist || applySlip39Wordlist) && indexedWords.size === 0 && expectedWordCount >= 18) {
       const tokens = (aggregatedRawText.match(/[a-zA-Z]{3,8}/g) || [])
         .map((token) => token.toLowerCase());
+      const activeWordlist = applyBip39Wordlist ? bip39English : slip39English;
+      const correctFn = applyBip39Wordlist ? correctToBip39 : correctToSlip39;
       const orderedWords: string[] = [];
       for (const token of tokens) {
-        const corrected = correctToBip39(token).word;
-        const isLikelyBip39 = bip39English.includes(token) || levenshteinDistance(token, corrected) <= 1;
+        const corrected = correctFn(token).word;
+        const isLikelyBip39 = activeWordlist.includes(token) || levenshteinDistance(token, corrected) <= 1;
         if (!isLikelyBip39) continue;
         orderedWords.push(corrected);
         if (orderedWords.length >= expectedWordCount) break;
@@ -1650,6 +1732,14 @@ function CameraPanel() {
           console.log(`BIP39 auto-correction succeeded!`);
         }
       }
+    } else if (hasCompleteSequence && applySlip39Wordlist) {
+      // SLIP39 flow: no checksum validation, but apply conservative single-word correction
+      // for any word that is still not in the SLIP39 wordlist.
+      const anyInvalid = mnemonicWords.some(w => !slip39English.includes(w.word));
+      if (anyInvalid) {
+        trySlip39AutoCorrect(mnemonicWords);
+      }
+      console.log('[CameraPanel] SLIP39 OCR complete (SLIP39 wordlist correction applied).');
     } else if (hasCompleteSequence) {
       console.log('[CameraPanel] Mnemonic OCR complete (non-BIP39 flow), skipped BIP39 validation.');
     } else {
