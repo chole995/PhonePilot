@@ -971,9 +971,9 @@ const ALL_PAGE_ACTIONS: PageAction[] = [
     name: '完成流程(慢速)',
     group: '完成',
     steps: [
-      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 2000 },
-      { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 2000 },
-      { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 3000 },
+      { label: '点击继续', x: 55, y: 85, depth: 12, delayAfter: 4000 },
+      { label: '点击下一步', x: 55, y: 85, depth: 12, delayAfter: 4000 },
+      { label: '点击完成', x: 55, y: 85, depth: 12, delayAfter: 5000 },
       { label: '复位', x: 0, y: 0, depth: 12 },
     ],
   },
