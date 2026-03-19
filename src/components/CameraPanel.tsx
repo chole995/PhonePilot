@@ -2754,6 +2754,7 @@ function CameraPanel() {
         }
         let indexAdjustHint = '';
         if (hasStoredMnemonic && optionIndex < 0) {
+          // Fallback A: "tens ambiguity" — OCR read e.g. "10" as "1", try dividing by 10.
           const fallbackIndex = wordIndex >= 10 && wordIndex % 10 === 0
             ? Math.floor(wordIndex / 10)
             : -1;
@@ -2765,6 +2766,21 @@ function CameraPanel() {
               wordIndex = fallbackIndex;
               correctWord = fallbackWord;
               optionIndex = fallbackOptionIndex;
+            }
+          }
+        }
+        if (hasStoredMnemonic && optionIndex < 0 && mappedOptions.length > 0) {
+          // Fallback B: wordIndex unknown (OCR failed to read digit) — scan each option against
+          // the stored mnemonic. The verify screen always shows exactly one correct word;
+          // the other two options are plausible but different words.
+          for (let i = 0; i < mappedOptions.length; i++) {
+            const mnemonicIdx = storedMnemonic.words.indexOf(mappedOptions[i]);
+            if (mnemonicIdx >= 0) {
+              indexAdjustHint = `数字OCR失败，通过选项匹配推断: #${mnemonicIdx + 1} = ${mappedOptions[i]}`;
+              wordIndex = mnemonicIdx + 1;
+              correctWord = mappedOptions[i];
+              optionIndex = i;
+              break;
             }
           }
         }

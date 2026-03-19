@@ -140,7 +140,7 @@ function ControlPanel() {
     }
   }, [state.serverIP]);
 
-  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const delay = (ms: number): Promise<void> => new Promise<void>(resolve => setTimeout(resolve, ms));
 
   const syncArmStateToMain = useCallback(
     async (updates: Partial<ControlPanelState>) => {
