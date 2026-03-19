@@ -3,6 +3,13 @@ node_modules/
 .pnp
 .pnp.js
 
+# Yarn
+.yarn/install-state.gz
+.yarn/cache/
+
+# pnpm (not used)
+pnpm-lock.yaml
+
 # Build outputs
 dist/
 dist-electron/
@@ -15,7 +22,6 @@ out/
 *.swo
 .vscode/*
 !.vscode/extensions.json
-!.vscode/settings.json
 
 # OS files
 .DS_Store
