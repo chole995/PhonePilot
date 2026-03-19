@@ -1,56 +1,79 @@
-# PhonePilot
-
-通过机械臂让 AI Agent 操控硬件钱包的桌面应用。基于 [MCP 协议](https://modelcontextprotocol.io/)，AI 可以控制机械臂在硬件钱包屏幕上执行点击、滑动等操作，并通过摄像头实时观察结果。
+<h1 align="center">PhonePilot</h1>
 
 <p align="center">
-  <img src="docs/assets/arm-hardware.png" alt="硬件设置" width="600">
+  <strong>Enable AI Agents to Physically Control Your Phone & Hardware Wallet</strong>
 </p>
-
-## 为什么用硬件自动化
-
-硬件钱包为了安全性，不提供任何软件接口进行自动化操作。PhonePilot 使用物理机械臂直接触摸屏幕：
-
-- **突破封闭限制** - 无需钱包厂商支持，纯物理操作
-- **安全隔离** - 不接触钱包固件，不影响私钥安全
-- **通用兼容** - Ledger、Trezor、OneKey 等任何触摸屏钱包都能用
-- **批量操作** - 适合需要重复签名、多钱包管理等场景
-
-## 功能
-
-### MCP 工具
-
-| 工具 | 说明 |
-|------|------|
-| `arm-connect` | 连接机械臂控制器 |
-| `arm-disconnect` | 断开机械臂连接 |
-| `arm-move` | 移动机械臂到指定位置 |
-| `arm-click` | 在当前位置执行点击 |
-| `capture-frame` | 捕获当前摄像头画面 |
-| `execute-sequence` | 执行预置自动化流程（含 OCR 步骤） |
-| `stop-sequence` | 停止正在执行的流程 |
-| `confirm-action` | 点击确认/取消按钮 |
-| `input-pin` | 自动输入 PIN |
-| `mnemonic-store` | 存储/获取助记词 |
-| `mnemonic-verify` | 基于 OCR 选项匹配正确助记词 |
-
-### 摄像头
-
-- 自动检测并连接 DECXIN 摄像头
-- 手动对焦模式
-- 十字线和网格辅助
-- 90° 自动旋转适配设备屏幕
-
-### 机械臂控制
-
-- 毫米级 X/Y 轴移动精度
-- 可调步进距离 (1-50mm)
-- 可调触摸深度 (Z 轴)
 
 <p align="center">
-  <img src="docs/assets/control-software.png" alt="控制界面" width="700">
+  <a href="#"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Electron-28.x-47848F?logo=electron&logoColor=white" alt="Electron"></a>
+  <a href="#"><img src="https://img.shields.io/badge/React-18.x-61DAFB?logo=react&logoColor=white" alt="React"></a>
+  <a href="#"><img src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white" alt="TypeScript"></a>
+  <a href="#"><img src="https://img.shields.io/badge/MCP-1.x-8B5CF6" alt="MCP"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License"></a>
 </p>
 
-## 工作原理
+---
+
+## About
+
+**PhonePilot** is a desktop application that enables AI agents to physically control smartphones and hardware wallets through a mechanical arm. Using the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), AI agents (such as Claude, Cursor, etc.) can directly operate the mechanical arm to perform taps, swipes, and other touch interactions on the device screen, while observing the results in real-time through a camera feed.
+
+<p align="center">
+  <img src="docs/assets/arm-hardware.png" alt="Mechanical Arm Hardware" width="600">
+  <br>
+  <em>Mechanical Arm Hardware Setup</em>
+</p>
+
+## Features
+
+### 🤖 Native MCP Protocol Support
+
+Built-in MCP Server supporting both Streamable HTTP and SSE transport protocols, seamlessly integrating with any MCP-compatible AI client.
+
+| Tool | Description |
+|------|-------------|
+| `arm-connect` | Connect to the mechanical arm controller |
+| `arm-disconnect` | Disconnect from the mechanical arm |
+| `arm-move` | Move the arm to a specified position |
+| `arm-click` | Perform a click at the current position |
+| `capture-frame` | Capture the current camera frame |
+| `execute-sequence` | Execute a predefined automation sequence (supports OCR steps) |
+| `stop-sequence` | Stop the currently running sequence |
+| `confirm-action` | Tap confirm/cancel button on device |
+| `input-pin` | Automatically input PIN on device |
+| `mnemonic-store` | Store or retrieve captured mnemonic words |
+| `mnemonic-verify` | Match correct mnemonic word via OCR option selection |
+
+### 📷 Real-time Visual Feedback
+
+HD camera with live device screen preview, featuring:
+- Auto-detection and connection to DECXIN cameras
+- Manual focus mode to prevent autofocus hunting
+- Crosshair and grid overlay assistants
+- 90° auto-rotation to match device portrait display
+
+<p align="center">
+  <img src="docs/assets/control-software.png" alt="Control Software Interface" width="700">
+  <br>
+  <em>PhonePilot Control Interface</em>
+</p>
+
+### 🎮 Precision Mechanical Control
+
+- Millimeter-accurate X/Y axis movement
+- Adjustable step size (1-50mm)
+- Adjustable touch depth (Z-axis)
+- Real-time operation logging
+
+### 🖥️ Cross-Platform Desktop App
+
+Built with Electron, natively supporting:
+- macOS (Intel & Apple Silicon)
+- Windows (x64)
+- Linux (AppImage, deb)
+
+## How It Works
 
 ```
 ┌─────────────────┐     MCP Protocol      ┌──────────────────┐
@@ -61,127 +84,108 @@
                                     ┌──────────────┼──────────────┐
                                     │              │              │
                               ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
-                              │ 机械臂    │  │  摄像头   │  │ 硬件钱包  │
+                              │Mechanical │  │  Camera   │  │  Device   │
+                              │   Arm     │  │ (DECXIN)  │  │ (Wallet)  │
                               └───────────┘  └───────────┘  └───────────┘
 ```
 
-## 快速开始
+1. **AI Agent** connects to PhonePilot via MCP protocol
+2. **PhonePilot** translates MCP commands into mechanical arm control instructions
+3. **Mechanical Arm** performs physical touch operations on the device screen
+4. **Camera** captures the screen and returns the frame to the AI agent
+5. **AI Agent** analyzes the frame and decides on the next action
 
-### 环境要求
+## Getting Started
 
-- Node.js 20+
-- Yarn
-- 机械臂控制器 (COM 口连接)
-- USB 摄像头
-- Python 3.8+ (OCR 功能需要)
+### Prerequisites
 
-### 安装运行
+- Node.js 20.x or later
+- Yarn package manager
+- Compatible mechanical arm controller (via COM port)
+- USB camera (DECXIN recommended)
+- Python 3.8+ (required for OCR)
+
+### Installation & Running
 
 ```bash
 git clone https://github.com/your-username/PhonePilot.git
 cd PhonePilot
 yarn install
 
-# 初始化 OCR Python 环境（会创建 scripts/.venv）
+# Set up OCR Python environment (creates scripts/.venv)
 yarn setup:ocr
 
-# 下载 OCR 模型到本地
+# Download OCR models
 python3 - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download(
-  'PaddlePaddle/en_PP-OCRv5_mobile_rec',
-  local_dir='models/ocr_bench/en_PP-OCRv5_mobile_rec'
-)
-snapshot_download(
-  'PaddlePaddle/PP-OCRv5_mobile_det',
-  local_dir='models/ocr_bench/PP-OCRv5_mobile_det'
-)
-snapshot_download(
-  'PaddlePaddle/PP-OCRv5_mobile_rec',
-  local_dir='models/ocr_bench/PP-OCRv5_mobile_rec'
-)
+snapshot_download('PaddlePaddle/en_PP-OCRv5_mobile_rec', local_dir='models/ocr_bench/en_PP-OCRv5_mobile_rec')
+snapshot_download('PaddlePaddle/PP-OCRv5_mobile_det', local_dir='models/ocr_bench/PP-OCRv5_mobile_det')
+snapshot_download('PaddlePaddle/PP-OCRv5_mobile_rec', local_dir='models/ocr_bench/PP-OCRv5_mobile_rec')
 print('done')
 PY
 
 yarn electron:dev
 ```
 
-说明：
+> `yarn setup:ocr` automatically locates a compatible Python 3.9–3.12 and installs OCR dependencies into `scripts/.venv`.
+> To use a custom Python binary: `PHONEPILOT_PYTHON_BIN=/path/to/python yarn electron:dev`
 
-- `yarn setup:ocr` 会执行 `scripts/setup_ocr.sh`
-- 脚本会自动查找兼容的 Python 3.9 - 3.12，并在 `scripts/.venv` 中安装 OCR 依赖
-- Electron 开发态会自动优先使用 `scripts/.venv/bin/python`
-- 如需手动指定 Python，可设置环境变量 `PHONEPILOT_PYTHON_BIN=/path/to/python`
-
-### 构建
+### Building for Production
 
 ```bash
-yarn electron:build      # 当前平台
-yarn build:mac           # macOS
-yarn build:win           # Windows
-yarn build:linux         # Linux
+yarn electron:build   # current platform
+yarn build:mac        # macOS
+yarn build:win        # Windows
+yarn build:linux      # Linux
 ```
 
-## OCR 助记词识别
+## OCR Mnemonic Recognition
 
-PhonePilot 当前 OCR 采用双路径：
+PhonePilot uses a dual-path OCR pipeline for hardware wallet mnemonic capture:
 
-- 助记词页与确认页选项区：`en_PP-OCRv5_mobile_rec`
-- 确认页题号区（`#N`）：`PP-OCRv5_mobile_det + PP-OCRv5_mobile_rec`
+- **Mnemonic display page & confirmation option area**: `en_PP-OCRv5_mobile_rec`
+- **Confirmation page question number area (`#N`)**: `PP-OCRv5_mobile_det` + `PP-OCRv5_mobile_rec`
 
-- Electron 主进程通过 IPC `paddleocr-en-recognize` 调用 Python daemon
-- Python 脚本：`scripts/paddleocr_en_infer.py`
-- 助记词页：按 2 列 6 行网格重排并输出标准化 `1..12` 文本
-- 确认页：题号区域单独走 det+multi-rec；选项区域继续走 en-rec
-- 识别后继续走现有 BIP39 校验/纠错流程
+**Typical workflow:**
 
-### 典型工作流程
+1. `execute-sequence` triggers `ocrCapture` — mnemonic words are recognized and stored in memory
+2. `mnemonic-store` can be used to query or override stored words
+3. Verification page triggers `ocrVerify` — OCR reads the question number and candidate words
+4. `mnemonic-verify` matches the correct word and performs the tap
 
-1. 运行 `execute-sequence`（含 `ocrCapture` 步骤）触发助记词 OCR
-2. 识别到的助记词会写入内存（可通过 `mnemonic-store` 查询/覆盖）
-3. 验证页流程中触发 `ocrVerify`，OCR 识别题号与候选词
-4. 用 `mnemonic-verify` 匹配正确词并执行点击
+**OCR model paths** (default under `models/ocr_bench/`):
 
-### 使用示例
+| Model | Environment Variable Override |
+|-------|-------------------------------|
+| `en_PP-OCRv5_mobile_rec` | `PHONEPILOT_OCR_MODEL_DIR` |
+| `PP-OCRv5_mobile_det` | `PHONEPILOT_OCR_DET_MODEL_DIR` |
+| `PP-OCRv5_mobile_rec` | `PHONEPILOT_OCR_MULTI_REC_MODEL_DIR` |
 
-```typescript
-// 1. 跑一条包含 OCR 的自动流程（示例序列 ID 以项目内配置为准）
-await call('execute-sequence', { sequenceId: 'one-normal-24' });
+Optional tuning: `PHONEPILOT_OCR_MAX_IMAGE_SIDE` (default 1280), `PHONEPILOT_OCR_CPU_THREADS` (default 4)
 
-// 2. 查看当前缓存助记词
-const words = await call('mnemonic-store', { action: 'get' });
+## Automation Sequences
 
-// 3. 手工覆盖（可选）
-await call('mnemonic-store', {
-  action: 'set',
-  words: ['abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse', 'access', 'accident']
-});
-```
+PhonePilot ships with predefined sequences for hardware wallet testing. See [docs/test-case-arrangement.md](docs/test-case-arrangement.md) for the full list and coverage matrix.
 
-### OCR 模型路径
+| Category | Sequence IDs |
+|----------|-------------|
+| BIP39 Create | `create-wallet`, `create-wallet-18`, `create-wallet-24` |
+| BIP39 Import 12-word | `one-normal-12`, `two-normal-12`, `three-normal-12`, `api-normal-12` |
+| BIP39 Import 18/24-word | `one/two/three-normal-18`, `one/two/three-normal-24` |
+| SLIP39 Create | `create-slip39-single-template`, `create-slip39-multi-*` |
+| SLIP39 Import | `count20_one/two/three_normal`, `count33_one/two_normal` |
 
-- 默认加载：
-  - `models/ocr_bench/en_PP-OCRv5_mobile_rec`
-  - `models/ocr_bench/PP-OCRv5_mobile_det`
-  - `models/ocr_bench/PP-OCRv5_mobile_rec`
-- 可通过环境变量覆盖：
-  - `PHONEPILOT_OCR_MODEL_DIR=/absolute/path/to/en_PP-OCRv5_mobile_rec`
-  - `PHONEPILOT_OCR_DET_MODEL_DIR=/absolute/path/to/PP-OCRv5_mobile_det`
-  - `PHONEPILOT_OCR_MULTI_REC_MODEL_DIR=/absolute/path/to/PP-OCRv5_mobile_rec`
-- 可选性能参数：`PHONEPILOT_OCR_MAX_IMAGE_SIDE`（默认 1280）
-- 可选性能参数：`PHONEPILOT_OCR_CPU_THREADS`（默认 4）
+## MCP Integration
 
-## MCP 配置
+### Endpoints
 
-### 端点
+| Endpoint | Protocol | Purpose |
+|----------|----------|---------|
+| `POST /mcp` | Streamable HTTP | Modern MCP clients |
+| `GET /sse` | SSE | Legacy MCP clients |
+| `GET /health` | HTTP | Health check |
 
-| 端点 | 协议 | 用途 |
-|------|------|------|
-| `POST /mcp` | Streamable HTTP | 现代 MCP 客户端 |
-| `GET /sse` | SSE | 传统 MCP 客户端 |
-| `GET /health` | HTTP | 健康检查 |
-
-### 配置示例
+### Configuration Example
 
 ```json
 {
@@ -195,4 +199,10 @@ await call('mnemonic-store', {
 
 ## License
 
-[MIT](LICENSE)
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Made with ❤️ for the AI-powered future</sub>
+</p>
